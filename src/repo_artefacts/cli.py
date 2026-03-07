@@ -244,3 +244,82 @@ def pages(
     console.print(f"[bold]Setting up Pages[/bold] for [cyan]{org}/{repo}[/cyan]")
     url = setup_pages(root, org, repo)
     console.print(f"\n[bold green]✅ Done![/bold green] Player: {url}")
+
+
+@app.command()
+def publish(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    notebook_id: str | None = typer.Option(
+        None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID."
+    ),
+    skip_generate: bool = typer.Option(
+        False, "--skip-generate", help="Skip artefact generation (use existing files)."
+    ),
+    skip_verify: bool = typer.Option(
+        False, "--skip-verify", help="Skip page verification."
+    ),
+    remote: str = typer.Option(
+        "origin", "--remote", "-r", help="Git remote to push to."
+    ),
+    timeout: int = typer.Option(
+        900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
+    ),
+    verify_timeout: int = typer.Option(
+        120, "--verify-timeout", help="Max seconds to wait for Pages deployment."
+    ),
+) -> None:
+    """End-to-end: generate artefacts → setup pages → push → verify.
+
+    Generates all NotebookLM artefacts, sets up the GitHub Pages player,
+    commits and pushes, then verifies the hosted page is live.
+    """
+    from repo_artefacts.notebooklm import download_artefacts, generate_artefacts
+    from repo_artefacts.pages import get_github_info, setup_pages
+    from repo_artefacts.publish import (
+        check_artefacts,
+        git_commit_and_push,
+        verify_pages,
+    )
+
+    root = repo_path.resolve()
+    org, repo = get_github_info(root)
+    output_dir = root / "docs" / "artefacts"
+
+    console.print(
+        f"\n[bold]Publishing artefacts[/bold] for [cyan]{org}/{repo}[/cyan]\n"
+    )
+
+    # Step 1: Generate artefacts
+    if not skip_generate:
+        nb_id = _get_notebook_id(notebook_id)
+        console.rule("Step 1: Generate artefacts")
+        asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
+        asyncio.run(download_artefacts(nb_id, output_dir))
+
+    # Step 2: Check artefacts exist
+    console.rule("Step 2: Check artefacts")
+    found = check_artefacts(output_dir)
+    if not found:
+        console.print(
+            "[red]✗ No standard artefact files found in docs/artefacts/[/red]"
+        )
+        raise typer.Exit(1)
+    for kind, path in found.items():
+        console.print(f"  [green]✓[/green] {kind}: {path.name}")
+
+    # Step 3: Setup pages
+    console.rule("Step 3: Setup GitHub Pages")
+    url = setup_pages(root, org, repo)
+
+    # Step 4: Commit and push
+    console.rule("Step 4: Commit and push")
+    git_commit_and_push(
+        root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
+    )
+
+    # Step 5: Verify
+    if not skip_verify:
+        console.rule("Step 5: Verify deployment")
+        verify_pages(url, max_wait=verify_timeout)
+
+    console.print(f"\n[bold green]✅ Published![/bold green] {url}")

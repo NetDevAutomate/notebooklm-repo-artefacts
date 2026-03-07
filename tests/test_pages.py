@@ -1,10 +1,9 @@
 """Tests for repo_artefacts.pages module."""
 
-import re
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_artefacts.pages import README_BLOCK, get_github_info, setup_pages
+from repo_artefacts.pages import get_github_info, setup_pages
 
 
 def test_get_github_info(tmp_path: Path) -> None:
@@ -36,7 +35,9 @@ def test_setup_pages_creates_files(tmp_path: Path) -> None:
 def test_setup_pages_updates_existing_block(tmp_path: Path) -> None:
     """setup_pages replaces existing ARTEFACTS block."""
     readme = tmp_path / "README.md"
-    readme.write_text("# Test\n\n<!-- ARTEFACTS:START -->\nold\n<!-- ARTEFACTS:END -->\n")
+    readme.write_text(
+        "# Test\n\n<!-- ARTEFACTS:START -->\nold\n<!-- ARTEFACTS:END -->\n"
+    )
 
     with patch("repo_artefacts.pages.enable_github_pages", return_value=True):
         setup_pages(tmp_path, "Org", "repo")
