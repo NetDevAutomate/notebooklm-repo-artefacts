@@ -111,6 +111,18 @@ async def _request_artefact(
 ARTEFACT_TYPE_CODE = {"audio": 1, "video": 8, "slides": 3, "infographic": 7}
 
 
+async def _delete_failed_by_type(
+    client: NotebookLMClient, notebook_id: str, artefact: str
+) -> None:
+    """Delete any failed artefacts of the given type (required before retry)."""
+    type_code = ARTEFACT_TYPE_CODE[artefact]
+    raw = await client.artifacts._list_raw(notebook_id)
+    for art in raw:
+        if len(art) > 4 and art[2] == type_code and art[4] == 4:  # FAILED
+            console.print(f"  [dim]Deleting failed {artefact} ({art[0][:12]}...)[/dim]")
+            await client.artifacts.delete(notebook_id, art[0])
+
+
 async def _snapshot_artefact_ids(
     client: NotebookLMClient, notebook_id: str
 ) -> dict[str, set[str]]:
@@ -166,6 +178,7 @@ async def generate_artefacts(
         for artefact in artefacts:
             console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
             try:
+                await _delete_failed_by_type(client, notebook_id, artefact)
                 status = await _request_artefact(client, notebook_id, artefact)
                 if status.is_failed or not status.task_id:
                     retries[artefact] += 1
@@ -204,6 +217,7 @@ async def generate_artefacts(
                     f" ({retries[label]}/{MAX_RETRIES})..."
                 )
                 try:
+                    await _delete_failed_by_type(client, notebook_id, label)
                     status = await _request_artefact(client, notebook_id, label)
                     if status.is_failed or not status.task_id:
                         retries[label] += 1
