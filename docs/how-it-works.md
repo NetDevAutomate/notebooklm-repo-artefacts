@@ -83,7 +83,7 @@ sequenceDiagram
     rect rgb(30, 50, 40)
     Note over CLI,GH: Step 2 — Publish
     CLI->>CLI: Create player page (index.html)
-    CLI->>CLI: Update README with Repo Deep Dive table
+    CLI->>CLI: Update README with Generated Artefacts table
     CLI->>GH: Enable GitHub Pages (API)
     CLI->>GH: Git commit + push
     end

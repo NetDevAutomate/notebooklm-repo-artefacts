@@ -54,3 +54,10 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+
+      - id: check-links
+        name: check-links
+        entry: uv run python scripts/check_links.py
+        language: system
+        files: '(README\.md|docs/.*\.md)$'
+        pass_filenames: false

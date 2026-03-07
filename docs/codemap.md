@@ -62,7 +62,8 @@ Entry point for all CLI commands. Uses [Typer](https://typer.tiangolo.com/) for 
 | `delete` | Delete a notebook | `notebooklm` |
 | `update-readme` | Update README with artefact links | `readme_updater` |
 | `pages` | Set up GitHub Pages player | `pages` |
-| `publish` | End-to-end: generate → pages → push → verify | `notebooklm` → `pages` → `publish` |
+| `publish` | Generate → pages → push → verify | `notebooklm` → `pages` → `publish` |
+| `pipeline` | Full E2E: upload → generate → download → pages → push → verify → cleanup | `collector` → `notebooklm` → `pages` → `publish` |
 
 ### collector.py — Repository Content Gathering
 
@@ -133,7 +134,7 @@ Creates the player page, updates README links, and enables GitHub Pages via API.
 ```mermaid
 graph TD
     A[setup_pages] --> B[Write index.html<br/>from template]
-    A --> C[Update README.md<br/>Repo Deep Dive block]
+    A --> C[Update README.md<br/>Generated Artefacts block]
     A --> D[enable_github_pages]
     D --> E{Get GITHUB_TOKEN}
     E --> F[env var]
@@ -176,14 +177,41 @@ graph TD
 
 Scans `docs/artefacts/` for files and injects a listing between `<!-- ARTEFACTS:START -->` and `<!-- ARTEFACTS:END -->` markers. Used by the `download` command for basic file listings (the `pages` command uses its own table-based format).
 
+## CI Pipeline
+
+GitHub Actions runs on every push/PR to `main`. Can be run locally with [`act`](https://github.com/nektos/act).
+
+```mermaid
+graph LR
+    subgraph "Triggers"
+        A[Push to main]
+        B[Pull Request]
+        C[Manual dispatch]
+    end
+
+    subgraph "CI Jobs (Python 3.12 + 3.13)"
+        D[Checkout] --> E[Setup Python + uv]
+        E --> F[Install deps]
+        F --> G[Pre-commit checks]
+        G --> H[Pytest]
+        H --> I[Build package]
+    end
+
+    A & B & C --> D
+```
+
+Pre-commit hooks: `ruff` (lint + format), `pyright` (type check), `pytest` (tests), `detect-secrets`, standard file checks.
+
+See [CI & Testing](ci-and-testing.md) for `act` setup and local testing.
+
 ## Interfaces
 
 | Module | Exports | Used By |
-|--------|---------|---------|
-| `collector` | `collect_repo_content()`, `render_to_pdf()` | `cli.process`, `cli.publish` |
-| `notebooklm` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `list_*()`, `delete_notebook()` | `cli.*`, `publish` |
-| `pages` | `get_github_info()`, `get_github_token()`, `setup_pages()`, `enable_github_pages()` | `cli.pages`, `cli.publish` |
-| `publish` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()` | `cli.publish` |
+|--------|---------|---------:|
+| `collector` | `collect_repo_content()`, `render_to_pdf()` | `cli.process`, `cli.pipeline` |
+| `notebooklm` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `list_*()`, `delete_notebook()` | `cli.*`, `publish`, `pipeline` |
+| `pages` | `get_github_info()`, `get_github_token()`, `setup_pages()`, `enable_github_pages()` | `cli.pages`, `cli.publish`, `cli.pipeline` |
+| `publish` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()` | `cli.publish`, `cli.pipeline` |
 | `readme_updater` | `update_readme_artefacts()` | `cli.update-readme`, `cli.download` |
 
 ## Dependencies

@@ -17,7 +17,7 @@ console = Console()
 
 README_BLOCK = """\
 <!-- ARTEFACTS:START -->
-## Repo Deep Dive
+## Generated Artefacts
 
 > 🔍 **Explore this project** — AI-generated overviews via [Google NotebookLM](https://notebooklm.google.com)
 

@@ -230,7 +230,7 @@ def pages(
     """Set up GitHub Pages player for artefacts.
 
     Creates an HTML player page at docs/artefacts/index.html, updates README.md
-    with Repo Deep Dive links, and enables GitHub Pages via API.
+    with Generated Artefacts links, and enables GitHub Pages via API.
 
     Standard artefact filenames: audio_overview.m4a, video_overview.mp4,
     infographic.png, slides.pdf
