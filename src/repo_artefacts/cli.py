@@ -44,7 +44,7 @@ def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
 
     REPO_PATH defaults to the current directory.
     """
-    from repo_artefacts.collector import collect_repo_content
+    from repo_artefacts.collector import collect_repo_content, render_to_pdf
     from repo_artefacts.notebooklm import upload_repo
 
     repo_path = repo_path.resolve()
@@ -52,10 +52,12 @@ def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
     console.print(f"[bold]Collecting[/bold] content from [cyan]{repo_name}[/cyan]")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    content_path = output_dir / f"{repo_name}_content.md"
-    collect_repo_content(repo_path, content_path)
+    md_path = output_dir / f"{repo_name}_content.md"
+    collect_repo_content(repo_path, md_path)
 
-    result = asyncio.run(upload_repo(content_path, repo_name, notebook_id))
+    pdf_path = render_to_pdf(md_path)
+
+    result = asyncio.run(upload_repo(pdf_path, repo_name, notebook_id))
 
     table = Table(title="Notebook")
     table.add_column("Title", style="bold")

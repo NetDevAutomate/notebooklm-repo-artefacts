@@ -134,3 +134,35 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
     total_kb = output_path.stat().st_size / 1024
     console.print(f"[bold green]Collected[/bold green] {len(sections)} files ({total_kb:.1f} KB) → {output_path}")
     return output_path
+
+
+def render_to_pdf(md_path: Path) -> Path:
+    """Render a markdown file to PDF with Mermaid diagrams and tables.
+
+    Uses md2pdf-mermaid's HTML pipeline (Chromium via Playwright) to produce
+    a fully rendered PDF with diagrams as images.
+
+    Args:
+        md_path: Path to the markdown file.
+
+    Returns:
+        Path to the generated PDF file.
+    """
+    from md2pdf import convert_markdown_to_pdf_html
+
+    pdf_path = md_path.with_suffix(".pdf")
+    content = md_path.read_text(encoding="utf-8")
+    title = md_path.stem.replace("_", " ").title()
+
+    console.print(f"[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)...")
+    convert_markdown_to_pdf_html(
+        content,
+        str(pdf_path),
+        title=title,
+        page_size="A4",
+        orientation="portrait",
+        enable_mermaid=True,
+    )
+    pdf_kb = pdf_path.stat().st_size / 1024
+    console.print(f"[green]✓[/green] Rendered PDF ({pdf_kb:.1f} KB) → {pdf_path}")
+    return pdf_path

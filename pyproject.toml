@@ -5,6 +5,7 @@ description = "Generate NotebookLM artefacts (audio, video, slides, infographic)
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.0",
+    "md2pdf-mermaid>=1.4",
     "notebooklm-py>=0.3",
     "rich>=13.0",
 ]
