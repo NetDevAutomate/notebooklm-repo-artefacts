@@ -1,16 +1,21 @@
 """CLI entry point for repo-artefacts."""
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 
-import click
+import typer
 from rich.console import Console
 from rich.table import Table
 
 console = Console()
 
 ALL_ARTEFACTS = ["audio", "video", "slides", "infographic"]
+
+app = typer.Typer(
+    help="Generate NotebookLM artefacts (audio, video, slides, infographic) from any git repository.",
+)
 
 
 def _get_repo_name(repo_path: Path) -> str:
@@ -22,7 +27,6 @@ def _get_repo_name(repo_path: Path) -> str:
         )
         if result.returncode == 0:
             url = result.stdout.strip()
-            # Handle both https and ssh URLs
             name = url.rstrip("/").rsplit("/", 1)[-1]
             return name.removesuffix(".git")
     except FileNotFoundError:
@@ -30,20 +34,22 @@ def _get_repo_name(repo_path: Path) -> str:
     return repo_path.resolve().name
 
 
-@click.group()
-def main() -> None:
-    """Generate NotebookLM artefacts (audio, video, slides, infographic) from any git repository."""
+def _get_notebook_id(notebook_id: str | None) -> str:
+    """Resolve notebook ID from argument or NOTEBOOK_ID env var."""
+    nb_id = notebook_id or os.environ.get("NOTEBOOK_ID")
+    if not nb_id:
+        console.print("[red]No notebook ID. Use -n or set NOTEBOOK_ID env var.[/red]")
+        raise typer.Exit(1)
+    return nb_id
 
 
-@main.command()
-@click.argument("repo_path", type=click.Path(exists=True, path_type=Path), default=".")
-@click.option("-o", "--output-dir", type=click.Path(path_type=Path), default=Path("./docs/artefacts"))
-@click.option("-n", "--notebook-id", default=None, help="Existing NotebookLM notebook ID.")
-def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
-    """Collect repo content and upload to NotebookLM.
-
-    REPO_PATH defaults to the current directory.
-    """
+@app.command()
+def process(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    output_dir: Path = typer.Option(Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."),
+    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Existing NotebookLM notebook ID."),
+) -> None:
+    """Collect repo content and upload to NotebookLM."""
     from repo_artefacts.collector import collect_repo_content, render_to_pdf
     from repo_artefacts.notebooklm import upload_repo
 
@@ -60,7 +66,6 @@ def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
         return
 
     pdf_path = render_to_pdf(md_path)
-
     result = asyncio.run(upload_repo(pdf_path, repo_name, notebook_id))
 
     table = Table(title="Notebook")
@@ -69,17 +74,23 @@ def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
     table.add_row(result["title"], result["id"])
     console.print(table)
 
+    console.print(f"\nTo use this notebook in other commands:")
+    console.print(f"  export NOTEBOOK_ID={result['id']}")
 
-@main.command()
-@click.option("-n", "--notebook-id", required=True, help="Notebook ID to generate from.")
-@click.option("--audio", "audio", is_flag=True, help="Generate audio overview.")
-@click.option("--video", "video", is_flag=True, help="Generate video explainer.")
-@click.option("--slides", "slides", is_flag=True, help="Generate slide deck.")
-@click.option("--infographic", "infographic", is_flag=True, help="Generate infographic.")
-@click.option("--all", "all_", is_flag=True, help="Generate all artefact types (default if none specified).")
-def generate(notebook_id: str, audio: bool, video: bool, slides: bool, infographic: bool, all_: bool) -> None:
+
+@app.command()
+def generate(
+    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to generate from."),
+    audio: bool = typer.Option(False, "--audio", help="Generate audio overview."),
+    video: bool = typer.Option(False, "--video", help="Generate video explainer."),
+    slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
+    infographic: bool = typer.Option(False, "--infographic", help="Generate infographic."),
+    all_: bool = typer.Option(False, "--all", help="Generate all artefact types (default if none specified)."),
+) -> None:
     """Generate artefacts from a NotebookLM notebook."""
     from repo_artefacts.notebooklm import generate_artefacts
+
+    nb_id = _get_notebook_id(notebook_id)
 
     selected = []
     if audio:
@@ -95,22 +106,25 @@ def generate(notebook_id: str, audio: bool, video: bool, slides: bool, infograph
         selected = ALL_ARTEFACTS
 
     console.print(f"Generating: [bold]{', '.join(selected)}[/bold]")
-    asyncio.run(generate_artefacts(notebook_id, selected))
+    asyncio.run(generate_artefacts(nb_id, selected))
 
 
-@main.command()
-@click.option("-n", "--notebook-id", required=True, help="Notebook ID to download from.")
-@click.option("-o", "--output-dir", type=click.Path(path_type=Path), default=Path("./docs/artefacts"))
-def download(notebook_id: str, output_dir: Path) -> None:
+@app.command()
+def download(
+    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to download from."),
+    output_dir: Path = typer.Option(Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."),
+) -> None:
     """Download generated artefacts from a notebook."""
     from repo_artefacts.notebooklm import download_artefacts
 
-    asyncio.run(download_artefacts(notebook_id, output_dir))
+    nb_id = _get_notebook_id(notebook_id)
+    asyncio.run(download_artefacts(nb_id, output_dir))
 
 
-@main.command("list")
-@click.option("-n", "--notebook-id", default=None, help="List sources in this notebook.")
-def list_notebooks(notebook_id: str | None) -> None:
+@app.command("list")
+def list_cmd(
+    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="List sources in this notebook."),
+) -> None:
     """List notebooks, or sources within a notebook."""
     from repo_artefacts.notebooklm import list_notebooks as _list_notebooks
     from repo_artefacts.notebooklm import list_sources
@@ -121,11 +135,13 @@ def list_notebooks(notebook_id: str | None) -> None:
         asyncio.run(_list_notebooks())
 
 
-@main.command("delete")
-@click.option("-n", "--notebook-id", required=True, help="Notebook ID to delete.")
-@click.confirmation_option(prompt="Are you sure you want to delete this notebook?")
-def delete_cmd(notebook_id: str) -> None:
+@app.command("delete")
+def delete_cmd(
+    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to delete."),
+) -> None:
     """Delete a notebook and all its contents."""
     from repo_artefacts.notebooklm import delete_notebook
 
-    asyncio.run(delete_notebook(notebook_id))
+    nb_id = _get_notebook_id(notebook_id)
+    typer.confirm(f"Delete notebook {nb_id}?", abort=True)
+    asyncio.run(delete_notebook(nb_id))
