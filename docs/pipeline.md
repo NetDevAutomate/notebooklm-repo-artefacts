@@ -112,9 +112,21 @@ sequenceDiagram
 |---|---|---|
 | `repo_path` | Path to git repository (positional) | `.` |
 | `-n, --notebook-id` | Existing notebook ID (skips upload) | — |
+| `--audio` | Generate audio overview | — |
+| `--video` | Generate video explainer | — |
+| `--slides` | Generate slide deck | — |
+| `--infographic` | Generate infographic | — |
+| `--exclude` | Artefact types to skip (repeatable) | — |
+| `--resume` | Only generate artefacts not yet completed | `false` |
 | `-r, --remote` | Git remote to push to | `origin` |
 | `-t, --timeout` | Generation timeout per artefact (seconds) | `900` |
 | `--keep-notebook` | Don't delete the notebook after publishing | `false` |
+
+Selection modes (pick one):
+- **Default**: generate all four types, skipping any already completed in the notebook
+- **Explicit**: `--audio --video` — only generate the named types
+- **Exclude**: `--exclude infographic` — generate all except the named types
+- **Resume**: `--resume` — only generate types not yet completed (useful after quota hits)
 
 ## vs `publish`
 

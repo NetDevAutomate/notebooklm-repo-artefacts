@@ -335,6 +335,22 @@ def pipeline(
         envvar="NOTEBOOK_ID",
         help="Existing notebook ID (skips upload).",
     ),
+    audio: bool = typer.Option(False, "--audio", help="Generate audio overview."),
+    video: bool = typer.Option(False, "--video", help="Generate video explainer."),
+    slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
+    infographic: bool = typer.Option(
+        False, "--infographic", help="Generate infographic."
+    ),
+    exclude: list[str] = typer.Option(
+        [],
+        "--exclude",
+        help="Artefact types to skip (audio, video, slides, infographic). Repeatable.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Only generate artefacts not yet completed in the notebook.",
+    ),
     remote: str = typer.Option(
         "origin", "--remote", "-r", help="Git remote to push to."
     ),
@@ -350,6 +366,16 @@ def pipeline(
     Creates a NotebookLM notebook (or uses existing), generates all artefacts
     with retry, publishes via GitHub Pages, verifies deployment, then deletes
     the notebook since artefacts are now hosted in the repo.
+
+    Artefact selection (pick one mode):
+
+      Default: generate all four types.
+
+      --audio/--video/--slides/--infographic: only generate the specified types.
+
+      --exclude audio --exclude infographic: generate all except the named types.
+
+      --resume: only generate types not yet completed in the notebook.
     """
     from repo_artefacts.collector import collect_repo_content, render_to_pdf
     from repo_artefacts.notebooklm import (
@@ -389,19 +415,53 @@ def pipeline(
         md_path.unlink(missing_ok=True)
         pdf_path.unlink(missing_ok=True)
 
-    # Step 2: Generate (only missing artefacts)
+    # Step 2: Resolve which artefacts to generate
     console.rule("Step 2: Generate artefacts")
-    already_done = asyncio.run(get_completed_artefacts(nb_id))
-    needed = [a for a in ALL_ARTEFACTS if a not in already_done]
-    if already_done:
-        console.print(
-            f"  Already completed: [green]{', '.join(sorted(already_done))}[/green]"
-        )
-    if needed:
-        console.print(f"  Generating: [bold]{', '.join(needed)}[/bold]")
-        asyncio.run(generate_artefacts(nb_id, needed, timeout=timeout))
+
+    # Explicit includes take priority
+    selected = [
+        a
+        for a, flag in [
+            ("audio", audio),
+            ("video", video),
+            ("slides", slides),
+            ("infographic", infographic),
+        ]
+        if flag
+    ]
+
+    if selected:
+        # --audio/--video/etc: only these
+        target = selected
+    elif exclude:
+        # --exclude: all minus excluded
+        bad = {e.lower() for e in exclude}
+        unknown = bad - set(ALL_ARTEFACTS)
+        if unknown:
+            console.print(
+                f"[red]Unknown artefact types: {', '.join(unknown)}."
+                f" Valid: {', '.join(ALL_ARTEFACTS)}[/red]"
+            )
+            raise typer.Exit(1)
+        target = [a for a in ALL_ARTEFACTS if a not in bad]
     else:
-        console.print("  [green]All artefacts already generated[/green]")
+        # Default: all
+        target = list(ALL_ARTEFACTS)
+
+    # --resume or default: skip already-completed
+    if resume or (not selected and not exclude):
+        already_done = asyncio.run(get_completed_artefacts(nb_id))
+        if already_done:
+            console.print(
+                f"  Already completed: [green]{', '.join(sorted(already_done))}[/green]"
+            )
+        target = [a for a in target if a not in already_done]
+
+    if target:
+        console.print(f"  Generating: [bold]{', '.join(target)}[/bold]")
+        asyncio.run(generate_artefacts(nb_id, target, timeout=timeout))
+    else:
+        console.print("  [green]All requested artefacts already generated[/green]")
 
     # Step 3: Download
     console.rule("Step 3: Download artefacts")

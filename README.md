@@ -60,6 +60,15 @@ repo-artefacts pipeline /path/to/repo
 # Use an existing notebook (skips upload)
 repo-artefacts pipeline /path/to/repo -n NOTEBOOK_ID
 
+# Only generate audio and video (skip slides/infographic)
+repo-artefacts pipeline /path/to/repo --audio --video
+
+# Generate everything except infographic (preserve quota)
+repo-artefacts pipeline /path/to/repo --exclude infographic
+
+# Resume: only generate artefacts not yet completed in the notebook
+repo-artefacts pipeline /path/to/repo -n NOTEBOOK_ID --resume
+
 # Keep the notebook after publishing
 repo-artefacts pipeline /path/to/repo --keep-notebook
 ```
@@ -141,12 +150,14 @@ repo-artefacts download -o ./docs/artefacts
 | `repo_path` | process, pipeline, publish, pages | Path to git repository (positional) | `.` |
 | `-o, --output-dir` | process, download | Output directory | `./docs/artefacts` |
 | `-n, --notebook-id` | process, generate, download, list, delete, publish, pipeline | NotebookLM notebook ID (or `NOTEBOOK_ID` env var) | — |
-| `--audio` | generate | Generate audio overview | — |
-| `--video` | generate | Generate video explainer | — |
-| `--slides` | generate | Generate slide deck | — |
-| `--infographic` | generate | Generate infographic | — |
+| `--audio` | generate, pipeline | Generate audio overview | — |
+| `--video` | generate, pipeline | Generate video explainer | — |
+| `--slides` | generate, pipeline | Generate slide deck | — |
+| `--infographic` | generate, pipeline | Generate infographic | — |
 | `--all` | generate | Generate all artefact types (default if none specified) | — |
 | `-t, --timeout` | generate, publish, pipeline | Timeout in seconds per artefact | `900` |
+| `--exclude` | pipeline | Artefact types to skip (repeatable) | — |
+| `--resume` | pipeline | Only generate artefacts not yet completed | `false` |
 | `--keep-notebook` | pipeline | Don't delete the notebook after publishing | `false` |
 | `--skip-generate` | publish | Skip artefact generation (use existing files) | `false` |
 | `--skip-verify` | publish | Skip page verification | `false` |

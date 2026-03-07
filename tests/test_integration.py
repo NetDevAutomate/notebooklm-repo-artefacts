@@ -102,6 +102,7 @@ def test_collector_to_readme_flow(tmp_path: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
 
     from repo_artefacts.collector import collect_repo_content
+
     collect_repo_content(repo, out)
 
     assert out.exists()
@@ -111,7 +112,6 @@ def test_collector_to_readme_flow(tmp_path: Path) -> None:
 def test_link_checker_validates_block(tmp_path: Path) -> None:
     """The check_links script catches invalid anchors."""
     import importlib.util
-    import sys
 
     script = Path(__file__).resolve().parent.parent / "scripts" / "check_links.py"
     spec = importlib.util.spec_from_file_location("check_links", script)
@@ -121,13 +121,13 @@ def test_link_checker_validates_block(tmp_path: Path) -> None:
 
     # Valid block
     valid = README_BLOCK.format(base_url="https://org.github.io/repo/artefacts/")
-    mod.errors = []
-    mod.check_artefacts_block(Path("test.md"), valid)
-    assert mod.errors == []
+    mod.errors = []  # type: ignore[attr-defined]
+    mod.check_artefacts_block(Path("test.md"), valid)  # type: ignore[attr-defined]
+    assert mod.errors == []  # type: ignore[attr-defined]
 
     # Block with wrong heading
     bad = valid.replace("## Generated Artefacts", "## Wrong Heading")
-    mod.errors = []
-    mod.check_artefacts_block(Path("test.md"), bad)
-    assert len(mod.errors) == 1
-    assert "missing" in mod.errors[0].lower() or "Generated Artefacts" in mod.errors[0]
+    mod.errors = []  # type: ignore[attr-defined]
+    mod.check_artefacts_block(Path("test.md"), bad)  # type: ignore[attr-defined]
+    assert len(mod.errors) == 1  # type: ignore[attr-defined]
+    assert "missing" in mod.errors[0].lower() or "Generated Artefacts" in mod.errors[0]  # type: ignore[attr-defined]
