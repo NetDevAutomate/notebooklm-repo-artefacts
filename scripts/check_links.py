@@ -18,9 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_ANCHORS = {"", "#video", "#infographic", "#slides"}
-PAGES_URL_RE = re.compile(
-    r"https://[\w.-]+\.github\.io/[\w.-]+/artefacts/(#[\w-]*)?"
-)
+PAGES_URL_RE = re.compile(r"https://[\w.-]+\.github\.io/[\w.-]+/artefacts/(#[\w-]*)?")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 ARTEFACTS_BLOCK_RE = re.compile(
     r"^<!-- ARTEFACTS:START -->(.+?)^<!-- ARTEFACTS:END -->", re.DOTALL | re.MULTILINE
@@ -38,12 +36,16 @@ def check_artefacts_block(path: Path, content: str) -> None:
     block = m.group(1)
 
     if "## Generated Artefacts" not in block:
-        errors.append(f"{path}: ARTEFACTS block missing '## Generated Artefacts' heading")
+        errors.append(
+            f"{path}: ARTEFACTS block missing '## Generated Artefacts' heading"
+        )
 
     # Check table structure
     links = MARKDOWN_LINK_RE.findall(block)
     if len(links) < 4:
-        errors.append(f"{path}: ARTEFACTS block has {len(links)} links, expected at least 4")
+        errors.append(
+            f"{path}: ARTEFACTS block has {len(links)} links, expected at least 4"
+        )
 
     for label, url in links:
         if "github.io" in url:
@@ -59,7 +61,9 @@ def check_pages_url(path: Path, url: str) -> None:
     if fragment and fragment not in VALID_ANCHORS:
         errors.append(f"{path}: invalid anchor '{fragment}' in {url}")
 
-    if not parsed.path.endswith("/artefacts/") and not parsed.path.endswith("/artefacts"):
+    if not parsed.path.endswith("/artefacts/") and not parsed.path.endswith(
+        "/artefacts"
+    ):
         # Allow links to the repo itself
         if "github.io" in parsed.netloc and "/artefacts" not in parsed.path:
             return

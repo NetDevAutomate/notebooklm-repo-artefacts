@@ -104,6 +104,6 @@ def test_readme_block_table_format() -> None:
     """README_BLOCK uses a proper markdown table."""
     block = README_BLOCK.format(base_url="https://x.github.io/r/artefacts/")
     lines = block.splitlines()
-    table_lines = [l for l in lines if l.startswith("|")]
+    table_lines = [line for line in lines if line.startswith("|")]
     # Header row + separator + 4 data rows = 6
     assert len(table_lines) == 6

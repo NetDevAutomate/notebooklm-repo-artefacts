@@ -31,10 +31,13 @@ def test_collects_readme(tmp_path: Path) -> None:
 
 def test_collects_docs(tmp_path: Path) -> None:
     """Files under docs/ are collected."""
-    repo = _make_repo(tmp_path, {
-        "README.md": "# R",
-        "docs/guide.md": "# Guide\n\nSome guide.",
-    })
+    repo = _make_repo(
+        tmp_path,
+        {
+            "README.md": "# R",
+            "docs/guide.md": "# Guide\n\nSome guide.",
+        },
+    )
     out = tmp_path / "out.md"
     collect_repo_content(repo, out)
     assert "Some guide." in out.read_text()
@@ -42,10 +45,13 @@ def test_collects_docs(tmp_path: Path) -> None:
 
 def test_collects_config(tmp_path: Path) -> None:
     """Project config files are collected."""
-    repo = _make_repo(tmp_path, {
-        "README.md": "# R",
-        "pyproject.toml": '[project]\nname = "test"',
-    })
+    repo = _make_repo(
+        tmp_path,
+        {
+            "README.md": "# R",
+            "pyproject.toml": '[project]\nname = "test"',
+        },
+    )
     out = tmp_path / "out.md"
     collect_repo_content(repo, out)
     assert 'name = "test"' in out.read_text()
@@ -53,10 +59,13 @@ def test_collects_config(tmp_path: Path) -> None:
 
 def test_collects_source_files(tmp_path: Path) -> None:
     """Source files under src/ are collected."""
-    repo = _make_repo(tmp_path, {
-        "README.md": "# R",
-        "src/main.py": "print('hello')",
-    })
+    repo = _make_repo(
+        tmp_path,
+        {
+            "README.md": "# R",
+            "src/main.py": "print('hello')",
+        },
+    )
     out = tmp_path / "out.md"
     collect_repo_content(repo, out)
     assert "print('hello')" in out.read_text()
@@ -64,12 +73,15 @@ def test_collects_source_files(tmp_path: Path) -> None:
 
 def test_skips_ignored_dirs(tmp_path: Path) -> None:
     """Files in .git, node_modules, etc. are skipped."""
-    repo = _make_repo(tmp_path, {
-        "README.md": "# R",
-        "node_modules/pkg/index.js": "bad",
-        "__pycache__/mod.py": "bad",
-        "src/good.py": "good",
-    })
+    repo = _make_repo(
+        tmp_path,
+        {
+            "README.md": "# R",
+            "node_modules/pkg/index.js": "bad",
+            "__pycache__/mod.py": "bad",
+            "src/good.py": "good",
+        },
+    )
     out = tmp_path / "out.md"
     collect_repo_content(repo, out)
 
@@ -81,11 +93,14 @@ def test_skips_ignored_dirs(tmp_path: Path) -> None:
 def test_skips_large_source_files(tmp_path: Path) -> None:
     """Source files over MAX_SOURCE_LINES are skipped."""
     big_content = "\n".join(f"line {i}" for i in range(MAX_SOURCE_LINES + 10))
-    repo = _make_repo(tmp_path, {
-        "README.md": "# R",
-        "src/big.py": big_content,
-        "src/small.py": "small",
-    })
+    repo = _make_repo(
+        tmp_path,
+        {
+            "README.md": "# R",
+            "src/big.py": big_content,
+            "src/small.py": "small",
+        },
+    )
     out = tmp_path / "out.md"
     collect_repo_content(repo, out)
 
