@@ -6,13 +6,14 @@ from rich.console import Console
 
 console = Console()
 
-ARTEFACT_EXTENSIONS = {
-    ".mp3": "🎧 Audio Overview",
-    ".mp4": "🎬 Video Overview",
-    ".pptx": "📊 Slide Deck",
-    ".png": "🖼️ Infographic",
-    ".pdf": "📄 PDF Document",
+ARTEFACT_NAMES = {
+    "audio_overview": "🎧 Audio Overview",
+    "video_overview": "🎬 Video Overview",
+    "slides": "📊 Slide Deck",
+    "infographic": "🖼️ Infographic",
 }
+
+SKIP_SUFFIXES = {".md"}  # Skip collected markdown source files
 
 MARKER_START = "<!-- ARTEFACTS:START -->"
 MARKER_END = "<!-- ARTEFACTS:END -->"
@@ -34,10 +35,10 @@ def update_readme_artefacts(
         console.print(f"[yellow]No artefacts directory at {artefacts_dir}[/yellow]")
         return
 
-    # Collect artefacts (skip .md source files)
+    # Collect artefacts (skip .md source files and the content PDF)
     files = sorted(
         f for f in artefacts_dir.iterdir()
-        if f.is_file() and f.suffix in ARTEFACT_EXTENSIONS
+        if f.is_file() and f.suffix not in SKIP_SUFFIXES and not f.stem.endswith("_content")
     )
 
     # Build the section content
@@ -50,7 +51,12 @@ def update_readme_artefacts(
             pass
 
         for f in files:
-            label = ARTEFACT_EXTENSIONS.get(f.suffix, "📎 File")
+            # Match by filename prefix for label
+            label = "📎 File"
+            for prefix, name in ARTEFACT_NAMES.items():
+                if f.stem.startswith(prefix):
+                    label = name
+                    break
             rel_path = f"{rel_dir}/{f.name}"
             lines.append(f"- {label}: [{f.name}]({rel_path})")
         lines.append("")

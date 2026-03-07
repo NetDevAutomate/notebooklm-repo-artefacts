@@ -31,7 +31,7 @@ ARTEFACT_CONFIG: dict[str, dict] = {
 DOWNLOAD_MAP = [
     ("audio", "list_audio", "download_audio", "audio_overview.mp3"),
     ("video", "list_video", "download_video", "video_overview.mp4"),
-    ("slides", "list_slide_decks", "download_slide_deck", "slides.pptx"),
+    ("slides", "list_slide_decks", "download_slide_deck", "slides.pdf"),
     ("infographic", "list_infographics", "download_infographic", "infographic.png"),
 ]
 
@@ -87,32 +87,35 @@ async def generate_artefacts(
             cfg = ARTEFACT_CONFIG[artefact]
             console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
 
-            if artefact == "audio":
-                status = await client.artifacts.generate_audio(
-                    notebook_id,
-                    instructions=cfg["instructions"],
-                    audio_format=AudioFormat.DEEP_DIVE,
-                )
-            elif artefact == "video":
-                status = await client.artifacts.generate_video(
-                    notebook_id,
-                    instructions=cfg["instructions"],
-                    video_style=VideoStyle.WHITEBOARD,
-                )
-            elif artefact == "slides":
-                status = await client.artifacts.generate_slide_deck(
-                    notebook_id,
-                    instructions=cfg["instructions"],
-                )
-            elif artefact == "infographic":
-                status = await client.artifacts.generate_infographic(
-                    notebook_id,
-                    instructions=cfg["instructions"],
-                )
-            else:
-                continue
+            try:
+                if artefact == "audio":
+                    status = await client.artifacts.generate_audio(
+                        notebook_id,
+                        instructions=cfg["instructions"],
+                        audio_format=AudioFormat.DEEP_DIVE,
+                    )
+                elif artefact == "video":
+                    status = await client.artifacts.generate_video(
+                        notebook_id,
+                        instructions=cfg["instructions"],
+                        video_style=VideoStyle.WHITEBOARD,
+                    )
+                elif artefact == "slides":
+                    status = await client.artifacts.generate_slide_deck(
+                        notebook_id,
+                        instructions=cfg["instructions"],
+                    )
+                elif artefact == "infographic":
+                    status = await client.artifacts.generate_infographic(
+                        notebook_id,
+                        instructions=cfg["instructions"],
+                    )
+                else:
+                    continue
 
-            tasks[artefact] = status.task_id
+                tasks[artefact] = status.task_id
+            except Exception as e:
+                console.print(f"[red]✗[/red] Failed to request {artefact}: {e}")
 
         # Poll all concurrently every 30s
         pending = dict(tasks)
