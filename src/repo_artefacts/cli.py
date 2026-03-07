@@ -55,6 +55,10 @@ def process(repo_path: Path, output_dir: Path, notebook_id: str | None) -> None:
     md_path = output_dir / f"{repo_name}_content.md"
     collect_repo_content(repo_path, md_path)
 
+    if md_path.stat().st_size == 0 or md_path.read_text().strip() == f"# {repo_name}":
+        console.print("[red]No content collected. Is this a code repository?[/red]")
+        return
+
     pdf_path = render_to_pdf(md_path)
 
     result = asyncio.run(upload_repo(pdf_path, repo_name, notebook_id))
