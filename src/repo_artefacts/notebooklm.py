@@ -108,17 +108,59 @@ async def _request_artefact(
         raise ValueError(f"Unknown artefact type: {artefact}")
 
 
+ARTEFACT_TYPE_CODE = {"audio": 1, "video": 8, "slides": 3, "infographic": 7}
+
+
+async def _snapshot_artefact_ids(
+    client: NotebookLMClient, notebook_id: str
+) -> dict[str, set[str]]:
+    """Snapshot existing artefact IDs by type name."""
+    raw = await client.artifacts._list_raw(notebook_id)
+    code_to_name = {v: k for k, v in ARTEFACT_TYPE_CODE.items()}
+    result: dict[str, set[str]] = {name: set() for name in ARTEFACT_TYPE_CODE}
+    for art in raw:
+        if len(art) > 2:
+            name = code_to_name.get(art[2])
+            if name:
+                result[name].add(art[0])
+    return result
+
+
+async def _poll_by_type(
+    client: NotebookLMClient,
+    notebook_id: str,
+    artefact: str,
+    known_ids: set[str],
+) -> str:
+    """Find a new or changed artefact of the given type. Returns status string."""
+    type_code = ARTEFACT_TYPE_CODE[artefact]
+    raw = await client.artifacts._list_raw(notebook_id)
+    for art in raw:
+        if len(art) > 4 and art[2] == type_code:
+            status_code = art[4]
+            if art[0] not in known_ids or status_code in (3, 4):
+                # New artefact or status changed
+                if status_code == 3:
+                    return "completed"
+                elif status_code == 4:
+                    return "failed"
+                elif status_code in (1, 2):
+                    return "in_progress"
+    return "in_progress"
+
+
 async def generate_artefacts(
     notebook_id: str, artefacts: list[str], timeout: int = 900
 ) -> None:
     """Generate requested artefact types concurrently with retry on failure.
 
-    Fires off all generation requests, polls every 30s. If an artefact
-    fails (either at request time or during polling), retries up to
-    MAX_RETRIES times.
+    Polls by artefact type (not task_id) because the NotebookLM API returns
+    different IDs for generation tasks vs completed artefacts.
     """
     async with await NotebookLMClient.from_storage() as client:
-        pending: dict[str, str] = {}  # artefact -> task_id
+        # Snapshot existing artefacts so we can detect new completions
+        before = await _snapshot_artefact_ids(client, notebook_id)
+        pending: set[str] = set()
         retries: dict[str, int] = {a: 0 for a in artefacts}
 
         for artefact in artefacts:
@@ -133,7 +175,7 @@ async def generate_artefacts(
                         f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
                     )
                 else:
-                    pending[artefact] = status.task_id
+                    pending.add(artefact)
             except Exception as e:
                 retries[artefact] += 1
                 console.print(
@@ -173,7 +215,7 @@ async def generate_artefacts(
                             needs_retry.remove(label)
                         # else stays in needs_retry for next loop
                     else:
-                        pending[label] = status.task_id
+                        pending.add(label)
                         needs_retry.remove(label)
                 except Exception as e:
                     retries[label] += 1
@@ -190,30 +232,31 @@ async def generate_artefacts(
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
-            for label, task_id in list(pending.items()):
+            # Poll by artefact type (not task_id — they don't match)
+            for label in list(pending):
                 try:
-                    result = await client.artifacts.poll_status(notebook_id, task_id)
+                    status_str = await _poll_by_type(
+                        client, notebook_id, label, before.get(label, set())
+                    )
                 except Exception as e:
                     console.print(f"[yellow]⚠[/yellow] Poll error for {label}: {e}")
                     continue
 
-                if result.is_complete:
+                if status_str == "completed":
                     console.print(f"[green]✓[/green] {label.capitalize()} ready")
-                    del pending[label]
-                elif result.is_failed:
-                    del pending[label]
+                    pending.discard(label)
+                elif status_str == "failed":
+                    pending.discard(label)
                     retries[label] += 1
                     if retries[label] <= MAX_RETRIES:
                         console.print(
                             f"[yellow]⚠[/yellow] {label} failed"
-                            f" ({result.error or 'unknown'})"
                             f" — queued retry ({retries[label]}/{MAX_RETRIES})"
                         )
                         needs_retry.append(label)
                     else:
                         console.print(
-                            f"[red]✗[/red] {label} failed after"
-                            f" {MAX_RETRIES} retries: {result.error}"
+                            f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries"
                         )
                 else:
                     console.print(
