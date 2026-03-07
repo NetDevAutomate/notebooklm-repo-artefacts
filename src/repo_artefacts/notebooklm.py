@@ -235,15 +235,22 @@ async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
             items = await getattr(client.artifacts, list_method)(notebook_id)
             if not items:
                 continue
-            if len(items) == 1:
+            # Skip failed artefacts
+            ready = [i for i in items if i.is_completed]
+            if not ready:
+                console.print(
+                    f"[yellow]⚠[/yellow] {label}: exists but not ready (failed or processing), skipping"
+                )
+                continue
+            if len(ready) == 1:
                 path = str(output_dir / filename)
                 await getattr(client.artifacts, dl_method)(
-                    notebook_id, path, artifact_id=items[0].id
+                    notebook_id, path, artifact_id=ready[0].id
                 )
                 console.print(f"[green]✓[/green] Downloaded {path}")
             else:
                 stem, ext = filename.rsplit(".", 1)
-                for i, artifact in enumerate(items, 1):
+                for i, artifact in enumerate(ready, 1):
                     path = str(output_dir / f"{stem}_{i:02d}.{ext}")
                     await getattr(client.artifacts, dl_method)(
                         notebook_id, path, artifact_id=artifact.id
