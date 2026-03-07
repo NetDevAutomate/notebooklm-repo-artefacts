@@ -86,6 +86,7 @@ def generate(
     slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
     infographic: bool = typer.Option(False, "--infographic", help="Generate infographic."),
     all_: bool = typer.Option(False, "--all", help="Generate all artefact types (default if none specified)."),
+    timeout: int = typer.Option(900, "--timeout", "-t", help="Timeout in seconds per artefact (default: 900 = 15min)."),
 ) -> None:
     """Generate artefacts from a NotebookLM notebook."""
     from repo_artefacts.notebooklm import generate_artefacts
@@ -106,7 +107,7 @@ def generate(
         selected = ALL_ARTEFACTS
 
     console.print(f"Generating: [bold]{', '.join(selected)}[/bold]")
-    asyncio.run(generate_artefacts(nb_id, selected))
+    asyncio.run(generate_artefacts(nb_id, selected, timeout=timeout))
 
 
 @app.command()
@@ -116,9 +117,15 @@ def download(
 ) -> None:
     """Download generated artefacts from a notebook."""
     from repo_artefacts.notebooklm import download_artefacts
+    from repo_artefacts.readme_updater import update_readme_artefacts
 
     nb_id = _get_notebook_id(notebook_id)
     asyncio.run(download_artefacts(nb_id, output_dir))
+
+    # Auto-update README if it exists
+    readme = Path("README.md")
+    if readme.is_file():
+        update_readme_artefacts(readme, output_dir)
 
 
 @app.command("list")
@@ -145,3 +152,18 @@ def delete_cmd(
     nb_id = _get_notebook_id(notebook_id)
     typer.confirm(f"Delete notebook {nb_id}?", abort=True)
     asyncio.run(delete_notebook(nb_id))
+
+
+@app.command("update-readme")
+def update_readme(
+    readme: Path = typer.Option(Path("README.md"), "--readme", "-r", help="Path to README.md."),
+    artefacts_dir: Path = typer.Option(Path("./docs/artefacts"), "--artefacts-dir", "-a", help="Path to artefacts directory."),
+) -> None:
+    """Update README.md with a listing of generated artefacts.
+
+    Inserts or updates content between <!-- ARTEFACTS:START --> and
+    <!-- ARTEFACTS:END --> markers. If markers don't exist, appends to the end.
+    """
+    from repo_artefacts.readme_updater import update_readme_artefacts
+
+    update_readme_artefacts(readme, artefacts_dir)

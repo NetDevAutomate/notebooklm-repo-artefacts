@@ -12,7 +12,7 @@ console = Console()
 ARTEFACT_CONFIG: dict[str, dict] = {
     "audio": {
         "instructions": "Create an engaging audio overview of this codebase, explaining its architecture, key components, and how they work together",
-        "timeout": 600,
+        "timeout": 900,
     },
     "video": {
         "instructions": "Create a visual explainer of this codebase architecture and key workflows",
@@ -20,11 +20,11 @@ ARTEFACT_CONFIG: dict[str, dict] = {
     },
     "slides": {
         "instructions": "Create a presentation covering the codebase architecture, key components, and workflows",
-        "timeout": 300,
+        "timeout": 900,
     },
     "infographic": {
         "instructions": "Create an infographic showing the codebase architecture, module relationships, and key workflows",
-        "timeout": 300,
+        "timeout": 900,
     },
 }
 
@@ -72,7 +72,9 @@ async def upload_repo(
     return {"id": nb_id, "title": nb_title}
 
 
-async def generate_artefacts(notebook_id: str, artefacts: list[str]) -> None:
+async def generate_artefacts(
+    notebook_id: str, artefacts: list[str], timeout: int = 900
+) -> None:
     """Generate requested artefact types concurrently.
 
     Fires off all generation requests, then polls every 30s until each
@@ -116,19 +118,14 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str]) -> None:
         pending = dict(tasks)
         elapsed = 0
         poll_interval = 30
-        max_timeout = max(ARTEFACT_CONFIG[a]["timeout"] for a in pending)
 
-        while pending and elapsed < max_timeout:
+        console.print(f"[dim]Timeout set to {timeout}s ({timeout // 60}min)[/dim]")
+
+        while pending and elapsed < timeout:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
             for label, task_id in list(pending.items()):
-                timeout = ARTEFACT_CONFIG[label]["timeout"]
-                if elapsed > timeout:
-                    console.print(f"[red]✗[/red] {label.capitalize()} timed out")
-                    del pending[label]
-                    continue
-
                 result = await client.artifacts.poll_status(notebook_id, task_id)
                 if result.is_complete:
                     console.print(f"[green]✓[/green] {label.capitalize()} ready")
