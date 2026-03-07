@@ -1,34 +1,51 @@
-# repo-artefacts
+# notebooklm-repo-artefacts
 
 Generate NotebookLM artefacts — audio walkthroughs, video explainers, slide decks, and infographics — from any git repository.
 
 ## How It Works
 
+```
+repo → collect files → render to PDF (with Mermaid) → upload to NotebookLM → generate artefacts → download
+```
+
 1. **Collect** — Scans a git repo and assembles key files (README, docs, config, source code) into a single markdown document
-2. **Upload** — Sends the document to Google NotebookLM as a notebook source
-3. **Generate** — Creates audio, video, slide deck, and/or infographic artefacts via NotebookLM
-4. **Download** — Fetches the generated artefacts locally
+2. **Render** — Converts the markdown to a fully rendered PDF using Chromium via Playwright, including Mermaid diagrams and tables
+3. **Upload** — Sends the PDF to Google NotebookLM as a notebook source
+4. **Generate** — Creates audio, video, slide deck, and/or infographic artefacts via NotebookLM
+5. **Download** — Fetches the generated artefacts locally
+6. **Update README** — Optionally inserts an artefacts listing into your project's README
 
 ## Installation
 
 Requires Python 3.11+.
 
 ```bash
+# From PyPI (when published)
+uv tool install notebooklm-repo-artefacts
+
+# From GitHub
+uv tool install git+https://github.com/andytaylor/notebooklm-repo-artefacts.git
+
 # From local checkout
 uv tool install .
-
-# From git
-uv tool install git+https://github.com/youruser/repo-artefacts.git
 ```
 
 ## Prerequisites
 
-For NotebookLM features, authenticate first:
+Install Chromium for PDF rendering (used by Playwright):
+
+```bash
+playwright install chromium
+```
+
+For NotebookLM features (`process`, `list`, `generate`, `download`, `delete`), authenticate first:
 
 ```bash
 pip install notebooklm-py[browser]
 notebooklm login
 ```
+
+This opens a browser for Google cookie-based auth. Credentials are stored locally.
 
 ## Usage
 
@@ -48,6 +65,8 @@ repo-artefacts process /path/to/repo -o ./output
 repo-artefacts process -n NOTEBOOK_ID
 ```
 
+If a notebook with the same repo name already exists, it reuses it instead of creating a duplicate.
+
 ### `generate` — Create artefacts from a notebook
 
 ```bash
@@ -59,6 +78,9 @@ repo-artefacts generate -n NOTEBOOK_ID --audio --slides
 
 # Just video
 repo-artefacts generate -n NOTEBOOK_ID --video
+
+# Custom timeout (default: 900s / 15min)
+repo-artefacts generate -n NOTEBOOK_ID --timeout 1200
 ```
 
 Available flags: `--audio`, `--video`, `--slides`, `--infographic`, `--all`
@@ -68,6 +90,8 @@ Available flags: `--audio`, `--video`, `--slides`, `--infographic`, `--all`
 ```bash
 repo-artefacts download -n NOTEBOOK_ID -o ./docs/artefacts
 ```
+
+After downloading, if a `README.md` exists in the current directory, it automatically updates it with an artefacts listing between `<!-- ARTEFACTS:START -->` and `<!-- ARTEFACTS:END -->` markers.
 
 ### `list` — View notebooks and sources
 
@@ -79,6 +103,36 @@ repo-artefacts list
 repo-artefacts list -n NOTEBOOK_ID
 ```
 
+### `delete` — Remove a notebook
+
+```bash
+repo-artefacts delete -n NOTEBOOK_ID
+```
+
+Prompts for confirmation before deleting.
+
+### `update-readme` — Manually update README artefacts section
+
+```bash
+# Default paths
+repo-artefacts update-readme
+
+# Custom paths
+repo-artefacts update-readme -r ./README.md -a ./docs/artefacts
+```
+
+Inserts or updates content between `<!-- ARTEFACTS:START -->` and `<!-- ARTEFACTS:END -->` markers. If markers don't exist, appends to the end of the file.
+
+### Using `NOTEBOOK_ID` environment variable
+
+All commands that accept `-n NOTEBOOK_ID` also read from the `NOTEBOOK_ID` environment variable:
+
+```bash
+export NOTEBOOK_ID=ba6fa92e-f174-4a77-8fc6-fc4fc12a625d
+repo-artefacts generate
+repo-artefacts download -o ./docs/artefacts
+```
+
 ## Typical Workflow
 
 ```bash
@@ -88,24 +142,54 @@ repo-artefacts process /path/to/interesting-repo
 # 2. Find the notebook ID
 repo-artefacts list
 
-# 3. Generate all artefacts
-repo-artefacts generate -n NOTEBOOK_ID
+# 3. Set it for convenience
+export NOTEBOOK_ID=<id-from-step-2>
 
-# 4. Download everything
-repo-artefacts download -n NOTEBOOK_ID -o ./docs/artefacts
+# 4. Generate all artefacts
+repo-artefacts generate
+
+# 5. Download everything
+repo-artefacts download -o ./docs/artefacts
+
+# 6. Clean up when done
+repo-artefacts delete
 ```
+
+## Options Reference
+
+| Option | Commands | Description | Default |
+|---|---|---|---|
+| `repo_path` | process | Path to git repository (positional) | `.` |
+| `-o, --output-dir` | process, download | Output directory | `./docs/artefacts` |
+| `-n, --notebook-id` | process, generate, download, list, delete | NotebookLM notebook ID (or `NOTEBOOK_ID` env var) | — |
+| `--audio` | generate | Generate audio overview | — |
+| `--video` | generate | Generate video explainer | — |
+| `--slides` | generate | Generate slide deck | — |
+| `--infographic` | generate | Generate infographic | — |
+| `--all` | generate | Generate all artefact types (default if none specified) | — |
+| `-t, --timeout` | generate | Timeout in seconds per artefact | `900` |
+| `-r, --readme` | update-readme | Path to README.md | `./README.md` |
+| `-a, --artefacts-dir` | update-readme | Path to artefacts directory | `./docs/artefacts` |
 
 ## What Gets Collected
 
 The collector scans the repo and includes files in this priority order:
 
 1. **README** — `README.md`, `README.rst`, or `README.txt`
-2. **Docs** — All `.md` files under `docs/`
-3. **Project config** — `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, etc.
+2. **Docs** — All `.md`, `.rst`, `.txt` files under `docs/`
+3. **Project config** — `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Makefile`, etc.
 4. **Source code** — Files under `src/` (or repo root) with common extensions, limited to files under 500 lines
 
-Total output is capped at 500KB. README and docs are always included in full; source files are truncated first if the limit is hit.
+Total output is capped at **500KB**. README and docs are always included in full; source files are truncated first if the limit is hit.
+
+Supported source extensions: `.py`, `.ts`, `.js`, `.rs`, `.java`, `.go`, `.rb`, `.kt`, `.swift`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.scala`, `.ex`, `.exs`, `.clj`, `.zig`, `.lua`, `.sh`, `.bash`
+
+Skipped directories: `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `dist`, `build`, `.tox`, `.eggs`, `target`, `.next`, `.nuxt`, `vendor`
+
+## Acknowledgements
+
+> **Special thanks to [Teng Lin](https://github.com/teng-lin)** for creating the excellent [notebooklm-py](https://github.com/teng-lin/notebooklm-py) library, which powers all NotebookLM integration in this tool. His work in reverse-engineering and wrapping the NotebookLM API made this project possible.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
