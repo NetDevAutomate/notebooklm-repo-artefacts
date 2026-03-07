@@ -164,3 +164,10 @@ async def list_sources(notebook_id: str) -> None:
     for i, src in enumerate(sources, 1):
         table.add_row(str(i), src.id, src.title)
     console.print(table)
+
+
+async def delete_notebook(notebook_id: str) -> None:
+    """Delete a notebook and all its contents."""
+    async with await NotebookLMClient.from_storage() as client:
+        await client.notebooks.delete(notebook_id)
+        console.print(f"[green]✓[/green] Deleted notebook {notebook_id}")

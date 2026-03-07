@@ -113,3 +113,13 @@ def list_notebooks(notebook_id: str | None) -> None:
         asyncio.run(list_sources(notebook_id))
     else:
         asyncio.run(_list_notebooks())
+
+
+@main.command("delete")
+@click.option("-n", "--notebook-id", required=True, help="Notebook ID to delete.")
+@click.confirmation_option(prompt="Are you sure you want to delete this notebook?")
+def delete_cmd(notebook_id: str) -> None:
+    """Delete a notebook and all its contents."""
+    from repo_artefacts.notebooklm import delete_notebook
+
+    asyncio.run(delete_notebook(notebook_id))
