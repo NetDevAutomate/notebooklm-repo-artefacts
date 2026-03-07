@@ -1,5 +1,6 @@
 """NotebookLM integration for uploading repo content and generating artefacts."""
 
+import asyncio
 from pathlib import Path
 
 from notebooklm import AudioFormat, NotebookLMClient, VideoStyle
@@ -27,6 +28,13 @@ ARTEFACT_CONFIG: dict[str, dict] = {
     },
 }
 
+DOWNLOAD_MAP = [
+    ("audio", "list_audio", "download_audio", "audio_overview.mp3"),
+    ("video", "list_video", "download_video", "video_overview.mp4"),
+    ("slides", "list_slide_decks", "download_slide_deck", "slides.pptx"),
+    ("infographic", "list_infographics", "download_infographic", "infographic.png"),
+]
+
 
 async def upload_repo(
     content_path: Path,
@@ -36,11 +44,6 @@ async def upload_repo(
     """Upload collected repo content to a NotebookLM notebook.
 
     Checks for existing notebook with matching title before creating a new one.
-
-    Args:
-        content_path: Path to the collected markdown file.
-        repo_name: Repository name used for notebook title.
-        notebook_id: Existing notebook ID to reuse. Creates new if None.
 
     Returns:
         Dict with keys: id, title.
@@ -70,16 +73,17 @@ async def upload_repo(
 
 
 async def generate_artefacts(notebook_id: str, artefacts: list[str]) -> None:
-    """Generate requested artefact types for a notebook.
+    """Generate requested artefact types concurrently.
 
-    Args:
-        notebook_id: The notebook to generate from.
-        artefacts: List of artefact types: audio, video, slides, infographic.
+    Fires off all generation requests, then polls every 30s until each
+    completes or times out.
     """
     async with await NotebookLMClient.from_storage() as client:
+        # Fire off all requests
+        tasks: dict[str, str] = {}
         for artefact in artefacts:
             cfg = ARTEFACT_CONFIG[artefact]
-            console.print(f"[blue]⏳[/blue] Generating {artefact}...")
+            console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
 
             if artefact == "audio":
                 status = await client.artifacts.generate_audio(
@@ -103,52 +107,83 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str]) -> None:
                     notebook_id,
                     instructions=cfg["instructions"],
                 )
+            else:
+                continue
 
-            await client.artifacts.wait_for_completion(
-                notebook_id, status.task_id, timeout=cfg["timeout"], poll_interval=15
-            )
-            console.print(f"[green]✓[/green] {artefact.capitalize()} ready")
+            tasks[artefact] = status.task_id
+
+        # Poll all concurrently every 30s
+        pending = dict(tasks)
+        elapsed = 0
+        poll_interval = 30
+        max_timeout = max(ARTEFACT_CONFIG[a]["timeout"] for a in pending)
+
+        while pending and elapsed < max_timeout:
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+            for label, task_id in list(pending.items()):
+                timeout = ARTEFACT_CONFIG[label]["timeout"]
+                if elapsed > timeout:
+                    console.print(f"[red]✗[/red] {label.capitalize()} timed out")
+                    del pending[label]
+                    continue
+
+                result = await client.artifacts.poll_status(notebook_id, task_id)
+                if result.is_complete:
+                    console.print(f"[green]✓[/green] {label.capitalize()} ready")
+                    del pending[label]
+                else:
+                    console.print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
+
+        for label in pending:
+            console.print(f"[red]✗[/red] {label.capitalize()} did not complete")
 
     console.print("[bold green]Done.[/bold green]")
 
 
 async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
-    """Download all available artefacts from a notebook.
-
-    Args:
-        notebook_id: The notebook to download from.
-        output_dir: Directory to save downloaded files.
-    """
+    """Download all available artefacts from a notebook."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    download_map = [
-        ("audio", "list_audio", "download_audio", "audio_{:02d}.mp3"),
-        ("video", "list_video", "download_video", "video_{:02d}.mp4"),
-        ("slides", "list_slide_decks", "download_slide_deck", "slides_{:02d}.pptx"),
-        ("infographic", "list_infographics", "download_infographic", "infographic_{:02d}.png"),
-    ]
-
     async with await NotebookLMClient.from_storage() as client:
-        for label, list_method, dl_method, name_fmt in download_map:
+        for label, list_method, dl_method, filename in DOWNLOAD_MAP:
             items = await getattr(client.artifacts, list_method)(notebook_id)
-            for i, artifact in enumerate(items, 1):
-                path = str(output_dir / name_fmt.format(i))
-                await getattr(client.artifacts, dl_method)(notebook_id, path, artifact_id=artifact.id)
+            if not items:
+                continue
+            if len(items) == 1:
+                path = str(output_dir / filename)
+                await getattr(client.artifacts, dl_method)(
+                    notebook_id, path, artifact_id=items[0].id
+                )
                 console.print(f"[green]✓[/green] Downloaded {path}")
+            else:
+                stem, ext = filename.rsplit(".", 1)
+                for i, artifact in enumerate(items, 1):
+                    path = str(output_dir / f"{stem}_{i:02d}.{ext}")
+                    await getattr(client.artifacts, dl_method)(
+                        notebook_id, path, artifact_id=artifact.id
+                    )
+                    console.print(f"[green]✓[/green] Downloaded {path}")
 
     console.print(f"[bold green]Done.[/bold green] Files saved to {output_dir}")
 
 
 async def list_notebooks() -> None:
-    """List all NotebookLM notebooks."""
+    """List all NotebookLM notebooks with source counts."""
     async with await NotebookLMClient.from_storage() as client:
         notebooks = await client.notebooks.list()
+        rows = []
+        for nb in notebooks:
+            sources = await client.sources.list(nb.id)
+            rows.append((nb.id, nb.title, str(len(sources))))
 
     table = Table(title="Notebooks")
     table.add_column("ID", style="cyan")
     table.add_column("Title", style="bold")
-    for nb in notebooks:
-        table.add_row(nb.id, nb.title)
+    table.add_column("Sources", justify="right")
+    for row in rows:
+        table.add_row(*row)
     console.print(table)
 
 
