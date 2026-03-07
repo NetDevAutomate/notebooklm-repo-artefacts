@@ -23,7 +23,9 @@ def _get_repo_name(repo_path: Path) -> str:
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, cwd=repo_path,
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -46,8 +48,16 @@ def _get_notebook_id(notebook_id: str | None) -> str:
 @app.command()
 def process(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
-    output_dir: Path = typer.Option(Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."),
-    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Existing NotebookLM notebook ID."),
+    output_dir: Path = typer.Option(
+        Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."
+    ),
+    notebook_id: str | None = typer.Option(
+        None,
+        "--notebook-id",
+        "-n",
+        envvar="NOTEBOOK_ID",
+        help="Existing NotebookLM notebook ID.",
+    ),
 ) -> None:
     """Collect repo content and upload to NotebookLM."""
     from repo_artefacts.collector import collect_repo_content, render_to_pdf
@@ -74,19 +84,34 @@ def process(
     table.add_row(result["title"], result["id"])
     console.print(table)
 
-    console.print(f"\nTo use this notebook in other commands:")
+    console.print("\nTo use this notebook in other commands:")
     console.print(f"  export NOTEBOOK_ID={result['id']}")
 
 
 @app.command()
 def generate(
-    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to generate from."),
+    notebook_id: str | None = typer.Option(
+        None,
+        "--notebook-id",
+        "-n",
+        envvar="NOTEBOOK_ID",
+        help="Notebook ID to generate from.",
+    ),
     audio: bool = typer.Option(False, "--audio", help="Generate audio overview."),
     video: bool = typer.Option(False, "--video", help="Generate video explainer."),
     slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
-    infographic: bool = typer.Option(False, "--infographic", help="Generate infographic."),
-    all_: bool = typer.Option(False, "--all", help="Generate all artefact types (default if none specified)."),
-    timeout: int = typer.Option(900, "--timeout", "-t", help="Timeout in seconds per artefact (default: 900 = 15min)."),
+    infographic: bool = typer.Option(
+        False, "--infographic", help="Generate infographic."
+    ),
+    all_: bool = typer.Option(
+        False, "--all", help="Generate all artefact types (default if none specified)."
+    ),
+    timeout: int = typer.Option(
+        900,
+        "--timeout",
+        "-t",
+        help="Timeout in seconds per artefact (default: 900 = 15min).",
+    ),
 ) -> None:
     """Generate artefacts from a NotebookLM notebook."""
     from repo_artefacts.notebooklm import generate_artefacts
@@ -112,8 +137,16 @@ def generate(
 
 @app.command()
 def download(
-    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to download from."),
-    output_dir: Path = typer.Option(Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."),
+    notebook_id: str | None = typer.Option(
+        None,
+        "--notebook-id",
+        "-n",
+        envvar="NOTEBOOK_ID",
+        help="Notebook ID to download from.",
+    ),
+    output_dir: Path = typer.Option(
+        Path("./docs/artefacts"), "--output-dir", "-o", help="Output directory."
+    ),
 ) -> None:
     """Download generated artefacts from a notebook."""
     from repo_artefacts.notebooklm import download_artefacts
@@ -130,7 +163,13 @@ def download(
 
 @app.command("list")
 def list_cmd(
-    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="List sources in this notebook."),
+    notebook_id: str | None = typer.Option(
+        None,
+        "--notebook-id",
+        "-n",
+        envvar="NOTEBOOK_ID",
+        help="List sources in this notebook.",
+    ),
 ) -> None:
     """List notebooks, or sources within a notebook."""
     from repo_artefacts.notebooklm import list_notebooks as _list_notebooks
@@ -144,7 +183,9 @@ def list_cmd(
 
 @app.command("delete")
 def delete_cmd(
-    notebook_id: str | None = typer.Option(None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to delete."),
+    notebook_id: str | None = typer.Option(
+        None, "--notebook-id", "-n", envvar="NOTEBOOK_ID", help="Notebook ID to delete."
+    ),
 ) -> None:
     """Delete a notebook and all its contents."""
     from repo_artefacts.notebooklm import delete_notebook
@@ -156,8 +197,15 @@ def delete_cmd(
 
 @app.command("update-readme")
 def update_readme(
-    readme: Path = typer.Option(Path("README.md"), "--readme", "-r", help="Path to README.md."),
-    artefacts_dir: Path = typer.Option(Path("./docs/artefacts"), "--artefacts-dir", "-a", help="Path to artefacts directory."),
+    readme: Path = typer.Option(
+        Path("README.md"), "--readme", "-r", help="Path to README.md."
+    ),
+    artefacts_dir: Path = typer.Option(
+        Path("./docs/artefacts"),
+        "--artefacts-dir",
+        "-a",
+        help="Path to artefacts directory.",
+    ),
 ) -> None:
     """Update README.md with a listing of generated artefacts.
 
@@ -167,3 +215,32 @@ def update_readme(
     from repo_artefacts.readme_updater import update_readme_artefacts
 
     update_readme_artefacts(readme, artefacts_dir)
+
+
+@app.command()
+def pages(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    org: str | None = typer.Option(
+        None, "--org", help="GitHub org/user (auto-detected)."
+    ),
+    repo: str | None = typer.Option(
+        None, "--repo", help="GitHub repo name (auto-detected)."
+    ),
+) -> None:
+    """Set up GitHub Pages player for artefacts.
+
+    Creates an HTML player page at docs/artefacts/index.html, updates README.md
+    with Repo Deep Dive links, and enables GitHub Pages via API.
+
+    Standard artefact filenames: audio_overview.m4a, video_overview.mp4,
+    infographic.png, slides.pdf
+    """
+    from repo_artefacts.pages import get_github_info, setup_pages
+
+    root = repo_path.resolve()
+    if not org or not repo:
+        org, repo = get_github_info(root)
+
+    console.print(f"[bold]Setting up Pages[/bold] for [cyan]{org}/{repo}[/cyan]")
+    url = setup_pages(root, org, repo)
+    console.print(f"\n[bold green]✅ Done![/bold green] Player: {url}")

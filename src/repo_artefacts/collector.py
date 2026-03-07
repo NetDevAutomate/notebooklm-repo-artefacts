@@ -8,10 +8,59 @@ console = Console()
 
 MAX_TOTAL_BYTES = 500 * 1024  # 500KB
 MAX_SOURCE_LINES = 500
-SOURCE_EXTENSIONS = {".py", ".ts", ".js", ".rs", ".java", ".go", ".rb", ".kt", ".swift", ".c", ".cpp", ".h", ".hpp", ".cs", ".scala", ".ex", ".exs", ".clj", ".zig", ".lua", ".sh", ".bash"}
-SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".tox", ".eggs", "target", ".next", ".nuxt", "vendor"}
+SOURCE_EXTENSIONS = {
+    ".py",
+    ".ts",
+    ".js",
+    ".rs",
+    ".java",
+    ".go",
+    ".rb",
+    ".kt",
+    ".swift",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".scala",
+    ".ex",
+    ".exs",
+    ".clj",
+    ".zig",
+    ".lua",
+    ".sh",
+    ".bash",
+}
+SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".tox",
+    ".eggs",
+    "target",
+    ".next",
+    ".nuxt",
+    "vendor",
+}
 README_NAMES = ["README.md", "README.rst", "README.txt", "README"]
-CONFIG_FILES = ["pyproject.toml", "setup.py", "setup.cfg", "Cargo.toml", "package.json", "go.mod", "build.gradle", "pom.xml", "Makefile", "CMakeLists.txt", "deno.json"]
+CONFIG_FILES = [
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "Cargo.toml",
+    "package.json",
+    "go.mod",
+    "build.gradle",
+    "pom.xml",
+    "Makefile",
+    "CMakeLists.txt",
+    "deno.json",
+]
 
 
 def _find_file(repo_path: Path, names: list[str]) -> Path | None:
@@ -116,7 +165,9 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             if content is None:
                 continue
             if source_used + len(content) > source_budget:
-                console.print(f"  [yellow]⚠[/yellow] Size limit reached, skipping remaining source files")
+                console.print(
+                    "  [yellow]⚠[/yellow] Size limit reached, skipping remaining source files"
+                )
                 break
             rel = src_file.relative_to(repo_path)
             suffix = src_file.suffix.lstrip(".")
@@ -132,7 +183,9 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             f.write(f"## {heading}\n\n{content}\n\n")
 
     total_kb = output_path.stat().st_size / 1024
-    console.print(f"[bold green]Collected[/bold green] {len(sections)} files ({total_kb:.1f} KB) → {output_path}")
+    console.print(
+        f"[bold green]Collected[/bold green] {len(sections)} files ({total_kb:.1f} KB) → {output_path}"
+    )
     return output_path
 
 
@@ -154,7 +207,9 @@ def render_to_pdf(md_path: Path) -> Path:
     content = md_path.read_text(encoding="utf-8")
     title = md_path.stem.replace("_", " ").title()
 
-    console.print(f"[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)...")
+    console.print(
+        "[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)..."
+    )
     convert_markdown_to_pdf_html(
         content,
         str(pdf_path),

@@ -59,7 +59,9 @@ async def upload_repo(
             if existing:
                 nb_id = existing.id
                 nb_title = existing.title
-                console.print(f"Found existing notebook: [bold]{nb_title}[/bold] ({nb_id})")
+                console.print(
+                    f"Found existing notebook: [bold]{nb_title}[/bold] ({nb_id})"
+                )
             else:
                 notebook = await client.notebooks.create(title=repo_name)
                 nb_id = notebook.id
@@ -82,21 +84,25 @@ async def _request_artefact(
     cfg = ARTEFACT_CONFIG[artefact]
     if artefact == "audio":
         status = await client.artifacts.generate_audio(
-            notebook_id, instructions=cfg["instructions"],
+            notebook_id,
+            instructions=cfg["instructions"],
             audio_format=AudioFormat.DEEP_DIVE,
         )
     elif artefact == "video":
         status = await client.artifacts.generate_video(
-            notebook_id, instructions=cfg["instructions"],
+            notebook_id,
+            instructions=cfg["instructions"],
             video_style=VideoStyle.WHITEBOARD,
         )
     elif artefact == "slides":
         status = await client.artifacts.generate_slide_deck(
-            notebook_id, instructions=cfg["instructions"],
+            notebook_id,
+            instructions=cfg["instructions"],
         )
     elif artefact == "infographic":
         status = await client.artifacts.generate_infographic(
-            notebook_id, instructions=cfg["instructions"],
+            notebook_id,
+            instructions=cfg["instructions"],
         )
     else:
         raise ValueError(f"Unknown artefact type: {artefact}")
@@ -118,9 +124,7 @@ async def generate_artefacts(
         for artefact in artefacts:
             console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
             try:
-                tasks[artefact] = await _request_artefact(
-                    client, notebook_id, artefact
-                )
+                tasks[artefact] = await _request_artefact(client, notebook_id, artefact)
             except Exception as e:
                 console.print(f"[red]✗[/red] Failed to request {artefact}: {e}")
 
@@ -128,7 +132,9 @@ async def generate_artefacts(
         elapsed = 0
         poll_interval = 30
 
-        console.print(f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]")
+        console.print(
+            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]"
+        )
 
         while pending and elapsed < timeout:
             await asyncio.sleep(poll_interval)
@@ -167,7 +173,9 @@ async def generate_artefacts(
                         )
                         del pending[label]
                 else:
-                    console.print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
+                    console.print(
+                        f"[dim]  … {label} still generating ({elapsed}s)[/dim]"
+                    )
 
         for label in pending:
             console.print(f"[red]✗[/red] {label.capitalize()} timed out")
