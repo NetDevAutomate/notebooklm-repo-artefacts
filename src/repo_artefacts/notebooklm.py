@@ -72,72 +72,105 @@ async def upload_repo(
     return {"id": nb_id, "title": nb_title}
 
 
+MAX_RETRIES = 3
+
+
+async def _request_artefact(
+    client: NotebookLMClient, notebook_id: str, artefact: str
+) -> str:
+    """Fire off a single generation request. Returns task_id."""
+    cfg = ARTEFACT_CONFIG[artefact]
+    if artefact == "audio":
+        status = await client.artifacts.generate_audio(
+            notebook_id, instructions=cfg["instructions"],
+            audio_format=AudioFormat.DEEP_DIVE,
+        )
+    elif artefact == "video":
+        status = await client.artifacts.generate_video(
+            notebook_id, instructions=cfg["instructions"],
+            video_style=VideoStyle.WHITEBOARD,
+        )
+    elif artefact == "slides":
+        status = await client.artifacts.generate_slide_deck(
+            notebook_id, instructions=cfg["instructions"],
+        )
+    elif artefact == "infographic":
+        status = await client.artifacts.generate_infographic(
+            notebook_id, instructions=cfg["instructions"],
+        )
+    else:
+        raise ValueError(f"Unknown artefact type: {artefact}")
+    return status.task_id
+
+
 async def generate_artefacts(
     notebook_id: str, artefacts: list[str], timeout: int = 900
 ) -> None:
-    """Generate requested artefact types concurrently.
+    """Generate requested artefact types concurrently with retry on failure.
 
-    Fires off all generation requests, then polls every 30s until each
-    completes or times out.
+    Fires off all generation requests, polls every 30s. If an artefact
+    fails, retries up to MAX_RETRIES times.
     """
     async with await NotebookLMClient.from_storage() as client:
-        # Fire off all requests
         tasks: dict[str, str] = {}
+        retries: dict[str, int] = {a: 0 for a in artefacts}
+
         for artefact in artefacts:
-            cfg = ARTEFACT_CONFIG[artefact]
             console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
-
             try:
-                if artefact == "audio":
-                    status = await client.artifacts.generate_audio(
-                        notebook_id,
-                        instructions=cfg["instructions"],
-                        audio_format=AudioFormat.DEEP_DIVE,
-                    )
-                elif artefact == "video":
-                    status = await client.artifacts.generate_video(
-                        notebook_id,
-                        instructions=cfg["instructions"],
-                        video_style=VideoStyle.WHITEBOARD,
-                    )
-                elif artefact == "slides":
-                    status = await client.artifacts.generate_slide_deck(
-                        notebook_id,
-                        instructions=cfg["instructions"],
-                    )
-                elif artefact == "infographic":
-                    status = await client.artifacts.generate_infographic(
-                        notebook_id,
-                        instructions=cfg["instructions"],
-                    )
-                else:
-                    continue
-
-                tasks[artefact] = status.task_id
+                tasks[artefact] = await _request_artefact(
+                    client, notebook_id, artefact
+                )
             except Exception as e:
                 console.print(f"[red]✗[/red] Failed to request {artefact}: {e}")
 
-        # Poll all concurrently every 30s
         pending = dict(tasks)
         elapsed = 0
         poll_interval = 30
 
-        console.print(f"[dim]Timeout set to {timeout}s ({timeout // 60}min)[/dim]")
+        console.print(f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]")
 
         while pending and elapsed < timeout:
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
             for label, task_id in list(pending.items()):
-                result = await client.artifacts.poll_status(notebook_id, task_id)
+                try:
+                    result = await client.artifacts.poll_status(notebook_id, task_id)
+                except Exception as e:
+                    console.print(f"[yellow]⚠[/yellow] Poll error for {label}: {e}")
+                    continue
+
                 if result.is_complete:
                     console.print(f"[green]✓[/green] {label.capitalize()} ready")
                     del pending[label]
+                elif result.is_failed:
+                    retries[label] += 1
+                    if retries[label] <= MAX_RETRIES:
+                        console.print(
+                            f"[yellow]⚠[/yellow] {label.capitalize()} failed"
+                            f" ({result.error or 'unknown error'})"
+                            f" — retrying ({retries[label]}/{MAX_RETRIES})..."
+                        )
+                        try:
+                            new_task_id = await _request_artefact(
+                                client, notebook_id, label
+                            )
+                            pending[label] = new_task_id
+                        except Exception as e:
+                            console.print(f"[red]✗[/red] Retry request failed: {e}")
+                            del pending[label]
+                    else:
+                        console.print(
+                            f"[red]✗[/red] {label.capitalize()} failed after"
+                            f" {MAX_RETRIES} retries: {result.error}"
+                        )
+                        del pending[label]
                 else:
                     console.print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
 
         for label in pending:
-            console.print(f"[red]✗[/red] {label.capitalize()} did not complete")
+            console.print(f"[red]✗[/red] {label.capitalize()} timed out")
 
     console.print("[bold green]Done.[/bold green]")
 
