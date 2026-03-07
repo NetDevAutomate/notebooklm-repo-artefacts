@@ -323,3 +323,108 @@ def publish(
         verify_pages(url, max_wait=verify_timeout)
 
     console.print(f"\n[bold green]✅ Published![/bold green] {url}")
+
+
+@app.command()
+def pipeline(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    notebook_id: str | None = typer.Option(
+        None,
+        "--notebook-id",
+        "-n",
+        envvar="NOTEBOOK_ID",
+        help="Existing notebook ID (skips upload).",
+    ),
+    remote: str = typer.Option(
+        "origin", "--remote", "-r", help="Git remote to push to."
+    ),
+    timeout: int = typer.Option(
+        900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
+    ),
+    keep_notebook: bool = typer.Option(
+        False, "--keep-notebook", help="Don't delete the notebook after publishing."
+    ),
+) -> None:
+    """Full pipeline: upload → generate → download → pages → push → verify → cleanup.
+
+    Creates a NotebookLM notebook (or uses existing), generates all artefacts
+    with retry, publishes via GitHub Pages, verifies deployment, then deletes
+    the notebook since artefacts are now hosted in the repo.
+    """
+    from repo_artefacts.collector import collect_repo_content, render_to_pdf
+    from repo_artefacts.notebooklm import (
+        delete_notebook,
+        download_artefacts,
+        generate_artefacts,
+        upload_repo,
+    )
+    from repo_artefacts.pages import get_github_info, setup_pages
+    from repo_artefacts.publish import (
+        check_artefacts,
+        git_commit_and_push,
+        verify_pages,
+    )
+
+    root = repo_path.resolve()
+    org, repo = get_github_info(root)
+    output_dir = root / "docs" / "artefacts"
+
+    console.print(f"\n[bold]Full pipeline[/bold] for [cyan]{org}/{repo}[/cyan]\n")
+
+    # Step 1: Upload to NotebookLM
+    if notebook_id:
+        nb_id = notebook_id
+        console.rule("Step 1: Using existing notebook")
+        console.print(f"  Notebook: {nb_id}")
+    else:
+        console.rule("Step 1: Collect and upload")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        md_path = output_dir / f"{repo}_content.md"
+        collect_repo_content(root, md_path)
+        pdf_path = render_to_pdf(md_path)
+        result = asyncio.run(upload_repo(pdf_path, repo))
+        nb_id = result["id"]
+        # Clean up temp files
+        md_path.unlink(missing_ok=True)
+        pdf_path.unlink(missing_ok=True)
+
+    # Step 2: Generate
+    console.rule("Step 2: Generate artefacts")
+    asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
+
+    # Step 3: Download
+    console.rule("Step 3: Download artefacts")
+    asyncio.run(download_artefacts(nb_id, output_dir))
+
+    # Step 4: Check
+    console.rule("Step 4: Check artefacts")
+    found = check_artefacts(output_dir)
+    if not found:
+        console.print("[red]✗ No artefacts downloaded[/red]")
+        raise typer.Exit(1)
+    for kind, path in found.items():
+        console.print(f"  [green]✓[/green] {kind}: {path.name}")
+
+    # Step 5: Pages
+    console.rule("Step 5: Setup GitHub Pages")
+    url = setup_pages(root, org, repo)
+
+    # Step 6: Push
+    console.rule("Step 6: Commit and push")
+    git_commit_and_push(
+        root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
+    )
+
+    # Step 7: Verify
+    console.rule("Step 7: Verify deployment")
+    verify_pages(url, max_wait=120)
+
+    # Step 8: Cleanup
+    if not keep_notebook:
+        console.rule("Step 8: Cleanup notebook")
+        console.print(f"  Deleting notebook {nb_id} (artefacts are now in the repo)")
+        asyncio.run(delete_notebook(nb_id))
+    else:
+        console.print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
+
+    console.print(f"\n[bold green]✅ Pipeline complete![/bold green] {url}")
