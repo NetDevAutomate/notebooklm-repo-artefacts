@@ -22,6 +22,8 @@ dependencies = [
     "md2pdf-mermaid>=1.4",
     "notebooklm-py>=0.3",
     "rich>=13.0",
+    "ruff>=0.15.5",
+    "pyright>=1.1.408",
 ]
 
 [project.urls]
