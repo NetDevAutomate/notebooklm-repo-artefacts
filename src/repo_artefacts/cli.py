@@ -356,6 +356,7 @@ def pipeline(
         delete_notebook,
         download_artefacts,
         generate_artefacts,
+        get_completed_artefacts,
         upload_repo,
     )
     from repo_artefacts.pages import get_github_info, setup_pages
@@ -388,9 +389,19 @@ def pipeline(
         md_path.unlink(missing_ok=True)
         pdf_path.unlink(missing_ok=True)
 
-    # Step 2: Generate
+    # Step 2: Generate (only missing artefacts)
     console.rule("Step 2: Generate artefacts")
-    asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
+    already_done = asyncio.run(get_completed_artefacts(nb_id))
+    needed = [a for a in ALL_ARTEFACTS if a not in already_done]
+    if already_done:
+        console.print(
+            f"  Already completed: [green]{', '.join(sorted(already_done))}[/green]"
+        )
+    if needed:
+        console.print(f"  Generating: [bold]{', '.join(needed)}[/bold]")
+        asyncio.run(generate_artefacts(nb_id, needed, timeout=timeout))
+    else:
+        console.print("  [green]All artefacts already generated[/green]")
 
     # Step 3: Download
     console.rule("Step 3: Download artefacts")
