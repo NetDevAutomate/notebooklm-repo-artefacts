@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Generate NotebookLM artefacts (audio, video, slides, infographic) from any git repository"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-authors = [{name = "Andy Taylor"}]
+authors = [{name = "NetDevAutomate"}]
 keywords = ["notebooklm", "repository", "documentation", "audio", "video", "slides", "infographic"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -27,9 +27,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/andytaylor/notebooklm-repo-artefacts"
-Repository = "https://github.com/andytaylor/notebooklm-repo-artefacts"
-Issues = "https://github.com/andytaylor/notebooklm-repo-artefacts/issues"
+Homepage = "https://github.com/NetDevAutomate/notebooklm-repo-artefacts"
+Repository = "https://github.com/NetDevAutomate/notebooklm-repo-artefacts"
+Issues = "https://github.com/NetDevAutomate/notebooklm-repo-artefacts/issues"
 
 [project.scripts]
 repo-artefacts = "repo_artefacts.cli:app"

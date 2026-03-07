@@ -1,143 +1,207 @@
 # Code Map — notebooklm-repo-artefacts
 
-## Project Structure
+> Architecture, module relationships, and data flows for the `repo-artefacts` CLI tool.
 
-```
-notebooklm-repo-artefacts/
-├── pyproject.toml
-├── LICENSE
-├── README.md
-├── docs/
-│   └── codemap.md
-└── src/
-    └── repo_artefacts/
-        ├── __init__.py
-        ├── cli.py              # Typer CLI entry point (6 commands)
-        ├── collector.py        # Repo scanning + markdown assembly + PDF rendering
-        ├── notebooklm.py       # NotebookLM API integration
-        └── readme_updater.py   # README artefacts section updater
-```
+## Overview
 
-## Module Overview
-
-| Module | Purpose | Key Dependencies |
-|---|---|---|
-| `cli.py` | CLI entry point — 6 commands via Typer | typer, rich |
-| `collector.py` | Scans repos, assembles markdown, renders PDF | md2pdf-mermaid, rich |
-| `notebooklm.py` | Upload, generate, download, list, delete via NotebookLM API | notebooklm-py, rich |
-| `readme_updater.py` | Inserts/updates artefact listings in README files | rich |
-
-## Architecture
-
-```mermaid
-graph TD
-    CLI[cli.py<br/>Typer commands] --> Collector[collector.py<br/>collect_repo_content]
-    Collector --> Render[collector.py<br/>render_to_pdf]
-    Render --> NLM[notebooklm.py<br/>upload_repo]
-    NLM --> API[NotebookLM API]
-    CLI --> NLM
-    CLI --> Updater[readme_updater.py<br/>update_readme_artefacts]
-
-    Render -.->|Chromium/Playwright| PDF[PDF with Mermaid]
-    PDF --> NLM
-```
-
-## Module Deep-Dives
-
-### cli.py
-
-Entry point for all 6 commands. Uses lazy imports to keep startup fast — `notebooklm-py` and `md2pdf-mermaid` are only imported when their commands run.
-
-| Command | Function | Description |
-|---|---|---|
-| `process` | `process()` | Collect → render → upload pipeline |
-| `generate` | `generate()` | Request artefact generation |
-| `download` | `download()` | Fetch artefacts + auto-update README |
-| `list` | `list_cmd()` | List notebooks or sources |
-| `delete` | `delete_cmd()` | Delete a notebook (with confirmation) |
-| `update-readme` | `update_readme()` | Manual README artefacts update |
-
-Helper functions:
-- `_get_repo_name()` — resolves repo name from git remote origin, falls back to directory name
-- `_get_notebook_id()` — resolves notebook ID from `-n` flag or `NOTEBOOK_ID` env var
-
-### collector.py
-
-Two main functions:
-
-- `collect_repo_content(repo_path, output_path)` — Scans a repo with a priority system (README → docs → config → source) and writes a combined markdown file. Budget-aware: caps total at 500KB, source files limited to 500 lines each.
-- `render_to_pdf(md_path)` — Converts markdown to PDF via `md2pdf-mermaid`, which uses Chromium/Playwright to render Mermaid diagrams as images.
-
-Constants control collection behaviour: `MAX_TOTAL_BYTES`, `MAX_SOURCE_LINES`, `SOURCE_EXTENSIONS`, `SKIP_DIRS`, `README_NAMES`, `CONFIG_FILES`.
-
-### notebooklm.py
-
-Async functions wrapping `notebooklm-py`:
-
-- `upload_repo()` — Creates or reuses a notebook, uploads the PDF as a source
-- `generate_artefacts()` — Fires off generation requests concurrently, polls every 30s until complete or timeout
-- `download_artefacts()` — Downloads all available artefact types (audio, video, slides, infographic)
-- `list_notebooks()` / `list_sources()` — Display notebooks and sources as Rich tables
-- `delete_notebook()` — Deletes a notebook by ID
-
-Generation config (`ARTEFACT_CONFIG`) defines per-type instructions and timeouts. `DOWNLOAD_MAP` maps artefact types to their list/download API methods and filenames.
-
-### readme_updater.py
-
-- `update_readme_artefacts(readme_path, artefacts_dir)` — Scans the artefacts directory, builds a markdown listing, and inserts it between `<!-- ARTEFACTS:START -->` / `<!-- ARTEFACTS:END -->` markers. Appends if markers don't exist.
-
-Uses `ARTEFACT_NAMES` dict to map filename prefixes to display labels with emoji.
-
-## Data Flow — `process` Command
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI as cli.py
-    participant Col as collector.py
-    participant PDF as render_to_pdf
-    participant NLM as notebooklm.py
-    participant API as NotebookLM API
-
-    User->>CLI: repo-artefacts process /path/to/repo
-    CLI->>Col: collect_repo_content(repo_path, md_path)
-    Col->>Col: Scan README, docs, config, source
-    Col-->>CLI: content.md
-    CLI->>PDF: render_to_pdf(md_path)
-    PDF->>PDF: Chromium renders Mermaid + tables
-    PDF-->>CLI: content.pdf
-    CLI->>NLM: upload_repo(pdf_path, repo_name)
-    NLM->>API: Create/reuse notebook
-    NLM->>API: Upload PDF as source
-    API-->>NLM: notebook_id
-    NLM-->>CLI: {id, title}
-    CLI-->>User: Notebook table + export hint
-```
-
-## Dependency Graph
+`notebooklm-repo-artefacts` collects content from a git repository, uploads it to Google NotebookLM, generates AI-powered artefacts (audio, video, slides, infographic), and publishes them via GitHub Pages.
 
 ```mermaid
 graph LR
-    CLI[cli.py] --> collector.py
-    CLI --> notebooklm.py
-    CLI --> readme_updater.py
-    collector.py --> md2pdf-mermaid
-    notebooklm.py --> notebooklm-py
-    CLI --> typer
-    CLI --> rich
-    collector.py --> rich
-    notebooklm.py --> rich
-    readme_updater.py --> rich
+    subgraph "Input"
+        REPO[Git Repository]
+    end
+
+    subgraph "repo-artefacts CLI"
+        CLI[cli.py<br/>Typer commands]
+        COL[collector.py<br/>Content gathering]
+        NLM[notebooklm.py<br/>API integration]
+        PG[pages.py<br/>GitHub Pages setup]
+        PUB[publish.py<br/>E2E workflow]
+        RU[readme_updater.py<br/>README injection]
+    end
+
+    subgraph "External Services"
+        NLMAPI[Google NotebookLM]
+        GHAPI[GitHub API]
+        GHPAGES[GitHub Pages]
+    end
+
+    subgraph "Output"
+        AUDIO[audio_overview.m4a]
+        VIDEO[video_overview.mp4]
+        SLIDES[slides.pdf]
+        INFOG[infographic.png]
+        HTML[index.html<br/>Player page]
+    end
+
+    REPO --> COL
+    COL --> NLM
+    NLM --> NLMAPI
+    NLMAPI --> NLM
+    NLM --> AUDIO & VIDEO & SLIDES & INFOG
+    PG --> GHAPI
+    PG --> HTML
+    PG --> RU
+    PUB --> COL & NLM & PG
+    CLI --> COL & NLM & PG & PUB & RU
 ```
 
-## Key Design Decisions
+## Module Breakdown
 
-| Decision | Rationale |
-|---|---|
-| Lazy imports in CLI | Fast startup — heavy deps only loaded when needed |
-| PDF via Chromium/Playwright | Accurate rendering of Mermaid diagrams and tables |
-| Budget-aware collection | 500KB cap prevents oversized uploads to NotebookLM |
-| Async NotebookLM operations | Concurrent artefact generation with polling |
-| Marker-based README updates | Non-destructive — only touches content between markers |
-| CLI command stays `repo-artefacts` | Shorter to type; package name adds `notebooklm-` prefix for discoverability |
-| `NOTEBOOK_ID` env var | Avoids repeating `-n` across commands in a workflow |
+### cli.py — Command Router
+
+Entry point for all CLI commands. Uses [Typer](https://typer.tiangolo.com/) for argument parsing and [Rich](https://rich.readthedocs.io/) for terminal output.
+
+| Command | Description | Calls |
+|---------|-------------|-------|
+| `process` | Collect repo content → upload to NotebookLM | `collector` → `notebooklm` |
+| `generate` | Generate artefacts from a notebook | `notebooklm` |
+| `download` | Download artefacts to local disk | `notebooklm` |
+| `list` | List notebooks or sources | `notebooklm` |
+| `delete` | Delete a notebook | `notebooklm` |
+| `update-readme` | Update README with artefact links | `readme_updater` |
+| `pages` | Set up GitHub Pages player | `pages` |
+| `publish` | End-to-end: generate → pages → push → verify | `notebooklm` → `pages` → `publish` |
+
+### collector.py — Repository Content Gathering
+
+Walks a git repository and assembles key files into a single markdown document for NotebookLM upload.
+
+```mermaid
+graph TD
+    A[Repository Root] --> B{Find README}
+    B --> C[Add README]
+    A --> D{Scan docs/}
+    D --> E[Add .md/.rst files]
+    A --> F{Find config}
+    F --> G[Add pyproject.toml etc.]
+    A --> H{Scan source files}
+    H --> I{Within 500KB budget?}
+    I -->|Yes| J[Add source file]
+    I -->|No| K[Stop — budget exceeded]
+    C & E & G & J --> L[Combined Markdown]
+    L --> M[render_to_pdf]
+    M --> N[PDF for upload]
+```
+
+**Key constraints:**
+- Total output capped at 500KB (`MAX_TOTAL_BYTES`)
+- Source files capped at 500 lines each (`MAX_SOURCE_LINES`)
+- Skips `.git`, `node_modules`, `__pycache__`, `.venv`, etc.
+- Priority order: README → docs → config → source
+
+### notebooklm.py — NotebookLM API Integration
+
+Manages the full lifecycle: upload content, generate artefacts, poll for completion, download results.
+
+```mermaid
+sequenceDiagram
+    participant CLI
+    participant NLM as notebooklm.py
+    participant API as NotebookLM API
+
+    CLI->>NLM: generate_artefacts(notebook_id, types)
+    loop For each artefact type
+        NLM->>API: generate_audio/video/slides/infographic
+        API-->>NLM: GenerationStatus(task_id)
+    end
+
+    loop Poll every 30s until timeout
+        NLM->>API: poll_status(task_id)
+        API-->>NLM: GenerationStatus
+        alt is_complete
+            NLM->>CLI: ✓ Ready
+        else is_failed
+            alt retries < MAX_RETRIES
+                NLM->>API: Re-request generation
+            else
+                NLM->>CLI: ✗ Failed after retries
+            end
+        else in_progress
+            NLM->>CLI: … still generating
+        end
+    end
+```
+
+**Retry logic:** Up to 3 retries per artefact. Handles both immediate failures (empty `task_id` from API) and failures detected during polling.
+
+### pages.py — GitHub Pages Setup
+
+Creates the player page, updates README links, and enables GitHub Pages via API.
+
+```mermaid
+graph TD
+    A[setup_pages] --> B[Write index.html<br/>from template]
+    A --> C[Update README.md<br/>Repo Deep Dive block]
+    A --> D[enable_github_pages]
+    D --> E{Get GITHUB_TOKEN}
+    E --> F[env var]
+    E --> G[tokens.age]
+    E --> H[macOS Keychain]
+    E --> I[1Password CLI]
+    F & G & H & I --> J{Token found?}
+    J -->|Yes| K[POST /repos/.../pages]
+    J -->|No| L[Skip — manual setup]
+```
+
+**Token resolution chain** (first match wins):
+1. `GITHUB_TOKEN` environment variable
+2. `~/.config/secrets/tokens.age` (age-encrypted, decrypted with `~/.config/age/keys.txt`)
+3. macOS Keychain (`api-keys` service)
+4. 1Password CLI (`op` — API_KEYS vault)
+
+### publish.py — End-to-End Workflow
+
+Orchestrates the full pipeline: generate → check → pages → push → verify.
+
+```mermaid
+graph TD
+    A[publish command] --> B{skip_generate?}
+    B -->|No| C[Generate artefacts<br/>via NotebookLM]
+    C --> D[Download artefacts]
+    B -->|Yes| E[Check existing files]
+    D --> E
+    E --> F{Standard files exist?}
+    F -->|No| G[Exit with error]
+    F -->|Yes| H[Setup GitHub Pages]
+    H --> I[Git commit + push]
+    I --> J{skip_verify?}
+    J -->|No| K[Poll Pages URL<br/>until 200 or timeout]
+    J -->|Yes| L[Done]
+    K --> L
+```
+
+### readme_updater.py — README Injection
+
+Scans `docs/artefacts/` for files and injects a listing between `<!-- ARTEFACTS:START -->` and `<!-- ARTEFACTS:END -->` markers. Used by the `download` command for basic file listings (the `pages` command uses its own table-based format).
+
+## Interfaces
+
+| Module | Exports | Used By |
+|--------|---------|---------|
+| `collector` | `collect_repo_content()`, `render_to_pdf()` | `cli.process`, `cli.publish` |
+| `notebooklm` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `list_*()`, `delete_notebook()` | `cli.*`, `publish` |
+| `pages` | `get_github_info()`, `get_github_token()`, `setup_pages()`, `enable_github_pages()` | `cli.pages`, `cli.publish` |
+| `publish` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()` | `cli.publish` |
+| `readme_updater` | `update_readme_artefacts()` | `cli.update-readme`, `cli.download` |
+
+## Dependencies
+
+```mermaid
+graph BT
+    CLI[cli.py] --> COL[collector.py]
+    CLI --> NLM[notebooklm.py]
+    CLI --> PG[pages.py]
+    CLI --> PUB[publish.py]
+    CLI --> RU[readme_updater.py]
+    PUB --> NLM
+    PUB --> PG
+
+    NLM -.-> NLMPY[notebooklm-py]
+    COL -.-> MD2PDF[md2pdf-mermaid]
+    CLI -.-> TYPER[typer]
+    CLI -.-> RICH[rich]
+```
+
+Solid lines = internal imports. Dotted lines = external packages.

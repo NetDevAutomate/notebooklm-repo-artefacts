@@ -3,7 +3,7 @@
 import asyncio
 from pathlib import Path
 
-from notebooklm import AudioFormat, NotebookLMClient, VideoStyle
+from notebooklm import AudioFormat, GenerationStatus, NotebookLMClient, VideoStyle
 from rich.console import Console
 from rich.table import Table
 
@@ -79,34 +79,33 @@ MAX_RETRIES = 3
 
 async def _request_artefact(
     client: NotebookLMClient, notebook_id: str, artefact: str
-) -> str:
-    """Fire off a single generation request. Returns task_id."""
+) -> GenerationStatus:
+    """Fire off a single generation request. Returns GenerationStatus."""
     cfg = ARTEFACT_CONFIG[artefact]
     if artefact == "audio":
-        status = await client.artifacts.generate_audio(
+        return await client.artifacts.generate_audio(
             notebook_id,
             instructions=cfg["instructions"],
             audio_format=AudioFormat.DEEP_DIVE,
         )
     elif artefact == "video":
-        status = await client.artifacts.generate_video(
+        return await client.artifacts.generate_video(
             notebook_id,
             instructions=cfg["instructions"],
             video_style=VideoStyle.WHITEBOARD,
         )
     elif artefact == "slides":
-        status = await client.artifacts.generate_slide_deck(
+        return await client.artifacts.generate_slide_deck(
             notebook_id,
             instructions=cfg["instructions"],
         )
     elif artefact == "infographic":
-        status = await client.artifacts.generate_infographic(
+        return await client.artifacts.generate_infographic(
             notebook_id,
             instructions=cfg["instructions"],
         )
     else:
         raise ValueError(f"Unknown artefact type: {artefact}")
-    return status.task_id
 
 
 async def generate_artefacts(
@@ -115,28 +114,79 @@ async def generate_artefacts(
     """Generate requested artefact types concurrently with retry on failure.
 
     Fires off all generation requests, polls every 30s. If an artefact
-    fails, retries up to MAX_RETRIES times.
+    fails (either at request time or during polling), retries up to
+    MAX_RETRIES times.
     """
     async with await NotebookLMClient.from_storage() as client:
-        tasks: dict[str, str] = {}
+        pending: dict[str, str] = {}  # artefact -> task_id
         retries: dict[str, int] = {a: 0 for a in artefacts}
 
         for artefact in artefacts:
             console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
             try:
-                tasks[artefact] = await _request_artefact(client, notebook_id, artefact)
+                status = await _request_artefact(client, notebook_id, artefact)
+                if status.is_failed or not status.task_id:
+                    retries[artefact] += 1
+                    console.print(
+                        f"[yellow]⚠[/yellow] {artefact} failed immediately"
+                        f" ({status.error or 'no task_id'})"
+                        f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
+                    )
+                else:
+                    pending[artefact] = status.task_id
             except Exception as e:
-                console.print(f"[red]✗[/red] Failed to request {artefact}: {e}")
+                retries[artefact] += 1
+                console.print(
+                    f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
+                    f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
+                )
 
-        pending = dict(tasks)
+        # Queue initial failures for retry
+        needs_retry = [
+            a for a in artefacts if a not in pending and retries[a] <= MAX_RETRIES
+        ]
+
         elapsed = 0
         poll_interval = 30
 
         console.print(
-            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]"
+            f"[dim]Timeout: {timeout}s ({timeout // 60}min),"
+            f" max retries: {MAX_RETRIES}[/dim]"
         )
 
-        while pending and elapsed < timeout:
+        while (pending or needs_retry) and elapsed < timeout:
+            # Retry any queued failures
+            for label in list(needs_retry):
+                console.print(
+                    f"[blue]⏳[/blue] Retrying {label}"
+                    f" ({retries[label]}/{MAX_RETRIES})..."
+                )
+                try:
+                    status = await _request_artefact(client, notebook_id, label)
+                    if status.is_failed or not status.task_id:
+                        retries[label] += 1
+                        if retries[label] > MAX_RETRIES:
+                            console.print(
+                                f"[red]✗[/red] {label} failed after"
+                                f" {MAX_RETRIES} retries: {status.error}"
+                            )
+                            needs_retry.remove(label)
+                        # else stays in needs_retry for next loop
+                    else:
+                        pending[label] = status.task_id
+                        needs_retry.remove(label)
+                except Exception as e:
+                    retries[label] += 1
+                    if retries[label] > MAX_RETRIES:
+                        console.print(
+                            f"[red]✗[/red] {label} failed after"
+                            f" {MAX_RETRIES} retries: {e}"
+                        )
+                        needs_retry.remove(label)
+
+            if not pending and not needs_retry:
+                break
+
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
 
@@ -151,33 +201,26 @@ async def generate_artefacts(
                     console.print(f"[green]✓[/green] {label.capitalize()} ready")
                     del pending[label]
                 elif result.is_failed:
+                    del pending[label]
                     retries[label] += 1
                     if retries[label] <= MAX_RETRIES:
                         console.print(
-                            f"[yellow]⚠[/yellow] {label.capitalize()} failed"
-                            f" ({result.error or 'unknown error'})"
-                            f" — retrying ({retries[label]}/{MAX_RETRIES})..."
+                            f"[yellow]⚠[/yellow] {label} failed"
+                            f" ({result.error or 'unknown'})"
+                            f" — queued retry ({retries[label]}/{MAX_RETRIES})"
                         )
-                        try:
-                            new_task_id = await _request_artefact(
-                                client, notebook_id, label
-                            )
-                            pending[label] = new_task_id
-                        except Exception as e:
-                            console.print(f"[red]✗[/red] Retry request failed: {e}")
-                            del pending[label]
+                        needs_retry.append(label)
                     else:
                         console.print(
-                            f"[red]✗[/red] {label.capitalize()} failed after"
+                            f"[red]✗[/red] {label} failed after"
                             f" {MAX_RETRIES} retries: {result.error}"
                         )
-                        del pending[label]
                 else:
                     console.print(
                         f"[dim]  … {label} still generating ({elapsed}s)[/dim]"
                     )
 
-        for label in pending:
+        for label in list(pending) + needs_retry:
             console.print(f"[red]✗[/red] {label.capitalize()} timed out")
 
     console.print("[bold green]Done.[/bold green]")
