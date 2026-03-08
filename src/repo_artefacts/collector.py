@@ -1,13 +1,17 @@
 """Collect key files from a git repository into a single markdown document."""
 
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
-from rich.console import Console
-
-console = Console()
+from repo_artefacts.console import get_console
+from repo_artefacts.exceptions import CollectionError
 
 MAX_TOTAL_BYTES = 500 * 1024  # 500KB
 MAX_SOURCE_LINES = 500
+MAX_LINE_LENGTH = 10_000  # reject minified/generated files
+MAX_FILE_BYTES = 512 * 1024  # per-file size guard
 SOURCE_EXTENSIONS = {
     ".py",
     ".ts",
@@ -32,21 +36,23 @@ SOURCE_EXTENSIONS = {
     ".sh",
     ".bash",
 }
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "dist",
-    "build",
-    ".tox",
-    ".eggs",
-    "target",
-    ".next",
-    ".nuxt",
-    "vendor",
-}
+SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".tox",
+        ".eggs",
+        "target",
+        ".next",
+        ".nuxt",
+        "vendor",
+    }
+)
 README_NAMES = ["README.md", "README.rst", "README.txt", "README"]
 CONFIG_FILES = [
     "pyproject.toml",
@@ -63,6 +69,17 @@ CONFIG_FILES = [
 ]
 
 
+def _is_git_repo(path: Path) -> bool:
+    """Check if path is a git repo root (handles regular repos, worktrees, bare repos)."""
+    git_path = path / ".git"
+    # Regular repo: .git is a directory
+    # Worktree: .git is a file containing 'gitdir: /path/to/...'
+    if git_path.is_dir() or git_path.is_file():
+        return True
+    # Bare repo: has HEAD and objects/ directly
+    return (path / "HEAD").is_file() and (path / "objects").is_dir()
+
+
 def _find_file(repo_path: Path, names: list[str]) -> Path | None:
     """Return the first matching file from a list of candidate names."""
     for name in names:
@@ -73,26 +90,44 @@ def _find_file(repo_path: Path, names: list[str]) -> Path | None:
 
 
 def _iter_files(directory: Path, extensions: set[str] | None = None) -> list[Path]:
-    """Recursively find files, skipping ignored directories."""
+    """Walk directory tree with pruning. Explicit followlinks=False."""
     results: list[Path] = []
     if not directory.is_dir():
         return results
-    for item in sorted(directory.rglob("*")):
-        if any(skip in item.parts for skip in SKIP_DIRS):
-            continue
-        if item.is_file():
-            if extensions is None or item.suffix in extensions:
-                results.append(item)
+    for root_str, dirs, files in os.walk(directory, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        root_path = Path(root_str)
+        for fname in sorted(files):
+            if extensions is None or Path(fname).suffix in extensions:
+                results.append(root_path / fname)
     return results
 
 
 def _read_safe(path: Path, max_lines: int | None = None) -> str | None:
-    """Read a file, returning None if it fails or exceeds line limit."""
+    """Read a file safely with size, line count, and line length guards.
+
+    Returns None if the file cannot be read, exceeds max_lines,
+    exceeds MAX_FILE_BYTES, or contains lines longer than MAX_LINE_LENGTH
+    (indicating minified/generated content).
+    """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if max_lines and text.count("\n") > max_lines:
+        if path.stat().st_size > MAX_FILE_BYTES:
             return None
-        return text
+    except OSError:
+        return None
+
+    try:
+        if max_lines:
+            lines: list[str] = []
+            with path.open(encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f):
+                    if i >= max_lines:
+                        return None
+                    if len(line) > MAX_LINE_LENGTH:
+                        return None  # minified/generated file
+                    lines.append(line)
+            return "".join(lines)
+        return path.read_text(encoding="utf-8", errors="replace")
     except (OSError, UnicodeDecodeError):
         return None
 
@@ -111,12 +146,12 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
         The output_path written to.
 
     Raises:
-        click.BadParameter: If repo_path doesn't exist or isn't a directory.
+        ValueError: If repo_path doesn't exist, isn't a directory, or isn't a git repo.
     """
-    import click
-
     if not repo_path.is_dir():
-        raise click.BadParameter(f"'{repo_path}' is not a directory")
+        raise CollectionError(f"'{repo_path}' is not a directory")
+    if not _is_git_repo(repo_path):
+        raise CollectionError(f"'{repo_path}' is not a git repository")
 
     sections: list[tuple[str, str]] = []  # (heading, content)
     repo_name = repo_path.resolve().name
@@ -127,7 +162,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
         content = _read_safe(readme)
         if content:
             sections.append((readme.name, content))
-            console.print(f"  [green]✓[/green] {readme.name}")
+            get_console().print(f"  [green]✓[/green] {readme.name}")
 
     # 2. Docs directory
     docs_dir = repo_path / "docs"
@@ -137,7 +172,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             if content:
                 rel = md_file.relative_to(repo_path)
                 sections.append((str(rel), content))
-                console.print(f"  [green]✓[/green] {rel}")
+                get_console().print(f"  [green]✓[/green] {rel}")
 
     # 3. Project config
     config = _find_file(repo_path, CONFIG_FILES)
@@ -146,7 +181,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
         if content:
             rel = config.relative_to(repo_path)
             sections.append((str(rel), content))
-            console.print(f"  [green]✓[/green] {rel}")
+            get_console().print(f"  [green]✓[/green] {rel}")
 
     # 4. Source files (budget-aware)
     priority_total = sum(len(c) for _, c in sections)
@@ -165,7 +200,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             if content is None:
                 continue
             if source_used + len(content) > source_budget:
-                console.print(
+                get_console().print(
                     "  [yellow]⚠[/yellow] Size limit reached, skipping remaining source files"
                 )
                 break
@@ -173,7 +208,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             suffix = src_file.suffix.lstrip(".")
             sections.append((str(rel), f"```{suffix}\n{content}\n```"))
             source_used += len(content)
-            console.print(f"  [green]✓[/green] {rel}")
+            get_console().print(f"  [green]✓[/green] {rel}")
 
     # Write combined document
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -183,7 +218,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
             f.write(f"## {heading}\n\n{content}\n\n")
 
     total_kb = output_path.stat().st_size / 1024
-    console.print(
+    get_console().print(
         f"[bold green]Collected[/bold green] {len(sections)} files ({total_kb:.1f} KB) → {output_path}"
     )
     return output_path
@@ -201,15 +236,19 @@ def render_to_pdf(md_path: Path) -> Path:
     Returns:
         Path to the generated PDF file.
     """
-    from md2pdf import convert_markdown_to_pdf_html
+    try:
+        from md2pdf import convert_markdown_to_pdf_html
+    except ImportError as exc:
+        raise SystemExit(
+            "PDF rendering requires md2pdf-mermaid with Playwright.\n"
+            "Install Chromium: playwright install chromium"
+        ) from exc
 
     pdf_path = md_path.with_suffix(".pdf")
     content = md_path.read_text(encoding="utf-8")
     title = md_path.stem.replace("_", " ").title()
 
-    console.print(
-        "[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)..."
-    )
+    get_console().print("[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)...")
     convert_markdown_to_pdf_html(
         content,
         str(pdf_path),
@@ -219,5 +258,5 @@ def render_to_pdf(md_path: Path) -> Path:
         enable_mermaid=True,
     )
     pdf_kb = pdf_path.stat().st_size / 1024
-    console.print(f"[green]✓[/green] Rendered PDF ({pdf_kb:.1f} KB) → {pdf_path}")
+    get_console().print(f"[green]✓[/green] Rendered PDF ({pdf_kb:.1f} KB) → {pdf_path}")
     return pdf_path

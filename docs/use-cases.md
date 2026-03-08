@@ -57,9 +57,9 @@ repo-artefacts publish ./my-repo -n $NOTEBOOK_ID
 ```
 
 This will:
-1. Check standard files exist (`audio_overview.m4a`, `video_overview.mp4`, `infographic.png`, `slides.pdf`)
+1. Check standard files exist (`audio_overview.mp3`, `video_overview.mp4`, `infographic.png`, `slides.pdf`)
 2. Create `docs/artefacts/index.html` player page
-3. Update README.md with "Repo Deep Dive" links
+3. Update README.md with "Generated Artefacts" links
 4. Enable GitHub Pages via API
 5. Git commit and push
 6. Verify the Pages URL returns 200
@@ -99,7 +99,7 @@ All commands expect these filenames in `docs/artefacts/`:
 
 | File | Type |
 |------|------|
-| `audio_overview.m4a` | Audio deep dive |
+| `audio_overview.mp3` | Audio deep dive |
 | `video_overview.mp4` | Video explainer |
 | `infographic.png` | Architecture infographic |
 | `slides.pdf` | Slide deck |

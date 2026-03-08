@@ -1,21 +1,38 @@
 """CLI entry point for repo-artefacts."""
 
+from __future__ import annotations
+
 import asyncio
+import functools
 import os
 import subprocess
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
-console = Console()
+from repo_artefacts.console import get_console
+from repo_artefacts.exceptions import RepoArtefactsError
 
 ALL_ARTEFACTS = ["audio", "video", "slides", "infographic"]
 
 app = typer.Typer(
     help="Generate NotebookLM artefacts (audio, video, slides, infographic) from any git repository.",
 )
+
+
+def _handle_errors(func):  # type: ignore[no-untyped-def]
+    """Decorator: catch domain exceptions and translate to typer.Exit."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+        try:
+            return func(*args, **kwargs)
+        except RepoArtefactsError as exc:
+            get_console().print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+    return wrapper
 
 
 def _get_repo_name(repo_path: Path) -> str:
@@ -40,12 +57,13 @@ def _get_notebook_id(notebook_id: str | None) -> str:
     """Resolve notebook ID from argument or NOTEBOOK_ID env var."""
     nb_id = notebook_id or os.environ.get("NOTEBOOK_ID")
     if not nb_id:
-        console.print("[red]No notebook ID. Use -n or set NOTEBOOK_ID env var.[/red]")
+        get_console().print("[red]No notebook ID. Use -n or set NOTEBOOK_ID env var.[/red]")
         raise typer.Exit(1)
     return nb_id
 
 
 @app.command()
+@_handle_errors
 def process(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
     output_dir: Path = typer.Option(
@@ -65,14 +83,14 @@ def process(
 
     repo_path = repo_path.resolve()
     repo_name = _get_repo_name(repo_path)
-    console.print(f"[bold]Collecting[/bold] content from [cyan]{repo_name}[/cyan]")
+    get_console().print(f"[bold]Collecting[/bold] content from [cyan]{repo_name}[/cyan]")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = output_dir / f"{repo_name}_content.md"
     collect_repo_content(repo_path, md_path)
 
     if md_path.stat().st_size == 0 or md_path.read_text().strip() == f"# {repo_name}":
-        console.print("[red]No content collected. Is this a code repository?[/red]")
+        get_console().print("[red]No content collected. Is this a code repository?[/red]")
         return
 
     pdf_path = render_to_pdf(md_path)
@@ -82,10 +100,10 @@ def process(
     table.add_column("Title", style="bold")
     table.add_column("ID", style="cyan")
     table.add_row(result["title"], result["id"])
-    console.print(table)
+    get_console().print(table)
 
-    console.print("\nTo use this notebook in other commands:")
-    console.print(f"  export NOTEBOOK_ID={result['id']}")
+    get_console().print("\nTo use this notebook in other commands:")
+    get_console().print(f"  export NOTEBOOK_ID={result['id']}")
 
 
 @app.command()
@@ -100,9 +118,7 @@ def generate(
     audio: bool = typer.Option(False, "--audio", help="Generate audio overview."),
     video: bool = typer.Option(False, "--video", help="Generate video explainer."),
     slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
-    infographic: bool = typer.Option(
-        False, "--infographic", help="Generate infographic."
-    ),
+    infographic: bool = typer.Option(False, "--infographic", help="Generate infographic."),
     all_: bool = typer.Option(
         False, "--all", help="Generate all artefact types (default if none specified)."
     ),
@@ -131,7 +147,7 @@ def generate(
     if all_ or not selected:
         selected = ALL_ARTEFACTS
 
-    console.print(f"Generating: [bold]{', '.join(selected)}[/bold]")
+    get_console().print(f"Generating: [bold]{', '.join(selected)}[/bold]")
     asyncio.run(generate_artefacts(nb_id, selected, timeout=timeout))
 
 
@@ -150,15 +166,9 @@ def download(
 ) -> None:
     """Download generated artefacts from a notebook."""
     from repo_artefacts.notebooklm import download_artefacts
-    from repo_artefacts.readme_updater import update_readme_artefacts
 
     nb_id = _get_notebook_id(notebook_id)
     asyncio.run(download_artefacts(nb_id, output_dir))
-
-    # Auto-update README if it exists
-    readme = Path("README.md")
-    if readme.is_file():
-        update_readme_artefacts(readme, output_dir)
 
 
 @app.command("list")
@@ -195,44 +205,19 @@ def delete_cmd(
     asyncio.run(delete_notebook(nb_id))
 
 
-@app.command("update-readme")
-def update_readme(
-    readme: Path = typer.Option(
-        Path("README.md"), "--readme", "-r", help="Path to README.md."
-    ),
-    artefacts_dir: Path = typer.Option(
-        Path("./docs/artefacts"),
-        "--artefacts-dir",
-        "-a",
-        help="Path to artefacts directory.",
-    ),
-) -> None:
-    """Update README.md with a listing of generated artefacts.
-
-    Inserts or updates content between <!-- ARTEFACTS:START --> and
-    <!-- ARTEFACTS:END --> markers. If markers don't exist, appends to the end.
-    """
-    from repo_artefacts.readme_updater import update_readme_artefacts
-
-    update_readme_artefacts(readme, artefacts_dir)
-
-
 @app.command()
+@_handle_errors
 def pages(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
-    org: str | None = typer.Option(
-        None, "--org", help="GitHub org/user (auto-detected)."
-    ),
-    repo: str | None = typer.Option(
-        None, "--repo", help="GitHub repo name (auto-detected)."
-    ),
+    org: str | None = typer.Option(None, "--org", help="GitHub org/user (auto-detected)."),
+    repo: str | None = typer.Option(None, "--repo", help="GitHub repo name (auto-detected)."),
 ) -> None:
     """Set up GitHub Pages player for artefacts.
 
     Creates an HTML player page at docs/artefacts/index.html, updates README.md
     with Generated Artefacts links, and enables GitHub Pages via API.
 
-    Standard artefact filenames: audio_overview.m4a, video_overview.mp4,
+    Standard artefact filenames: audio_overview.mp3, video_overview.mp4,
     infographic.png, slides.pdf
     """
     from repo_artefacts.pages import get_github_info, setup_pages
@@ -241,12 +226,13 @@ def pages(
     if not org or not repo:
         org, repo = get_github_info(root)
 
-    console.print(f"[bold]Setting up Pages[/bold] for [cyan]{org}/{repo}[/cyan]")
+    get_console().print(f"[bold]Setting up Pages[/bold] for [cyan]{org}/{repo}[/cyan]")
     url = setup_pages(root, org, repo)
-    console.print(f"\n[bold green]✅ Done![/bold green] Player: {url}")
+    get_console().print(f"\n[bold green]✅ Done![/bold green] Player: {url}")
 
 
 @app.command()
+@_handle_errors
 def publish(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
     notebook_id: str | None = typer.Option(
@@ -255,12 +241,8 @@ def publish(
     skip_generate: bool = typer.Option(
         False, "--skip-generate", help="Skip artefact generation (use existing files)."
     ),
-    skip_verify: bool = typer.Option(
-        False, "--skip-verify", help="Skip page verification."
-    ),
-    remote: str = typer.Option(
-        "origin", "--remote", "-r", help="Git remote to push to."
-    ),
+    skip_verify: bool = typer.Option(False, "--skip-verify", help="Skip page verification."),
+    remote: str = typer.Option("origin", "--remote", "-r", help="Git remote to push to."),
     timeout: int = typer.Option(
         900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
     ),
@@ -285,47 +267,44 @@ def publish(
     org, repo = get_github_info(root)
     output_dir = root / "docs" / "artefacts"
 
-    console.print(
-        f"\n[bold]Publishing artefacts[/bold] for [cyan]{org}/{repo}[/cyan]\n"
-    )
+    get_console().print(f"\n[bold]Publishing artefacts[/bold] for [cyan]{org}/{repo}[/cyan]\n")
 
     # Step 1: Generate artefacts
     if not skip_generate:
         nb_id = _get_notebook_id(notebook_id)
-        console.rule("Step 1: Generate artefacts")
+        get_console().rule("Step 1: Generate artefacts")
         asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
         asyncio.run(download_artefacts(nb_id, output_dir))
 
     # Step 2: Check artefacts exist
-    console.rule("Step 2: Check artefacts")
+    get_console().rule("Step 2: Check artefacts")
     found = check_artefacts(output_dir)
     if not found:
-        console.print(
-            "[red]✗ No standard artefact files found in docs/artefacts/[/red]"
-        )
+        get_console().print("[red]✗ No standard artefact files found in docs/artefacts/[/red]")
         raise typer.Exit(1)
     for kind, path in found.items():
-        console.print(f"  [green]✓[/green] {kind}: {path.name}")
+        get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
 
     # Step 3: Setup pages
-    console.rule("Step 3: Setup GitHub Pages")
+    get_console().rule("Step 3: Setup GitHub Pages")
     url = setup_pages(root, org, repo)
 
     # Step 4: Commit and push
-    console.rule("Step 4: Commit and push")
+    get_console().rule("Step 4: Commit and push")
     git_commit_and_push(
         root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
     )
 
     # Step 5: Verify
     if not skip_verify:
-        console.rule("Step 5: Verify deployment")
+        get_console().rule("Step 5: Verify deployment")
         verify_pages(url, max_wait=verify_timeout)
 
-    console.print(f"\n[bold green]✅ Published![/bold green] {url}")
+    get_console().print(f"\n[bold green]✅ Published![/bold green] {url}")
 
 
 @app.command()
+@_handle_errors
 def pipeline(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
     notebook_id: str | None = typer.Option(
@@ -338,9 +317,7 @@ def pipeline(
     audio: bool = typer.Option(False, "--audio", help="Generate audio overview."),
     video: bool = typer.Option(False, "--video", help="Generate video explainer."),
     slides: bool = typer.Option(False, "--slides", help="Generate slide deck."),
-    infographic: bool = typer.Option(
-        False, "--infographic", help="Generate infographic."
-    ),
+    infographic: bool = typer.Option(False, "--infographic", help="Generate infographic."),
     exclude: list[str] = typer.Option(
         [],
         "--exclude",
@@ -351,9 +328,7 @@ def pipeline(
         "--resume",
         help="Only generate artefacts not yet completed in the notebook.",
     ),
-    remote: str = typer.Option(
-        "origin", "--remote", "-r", help="Git remote to push to."
-    ),
+    remote: str = typer.Option("origin", "--remote", "-r", help="Git remote to push to."),
     timeout: int = typer.Option(
         900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
     ),
@@ -396,15 +371,15 @@ def pipeline(
     org, repo = get_github_info(root)
     output_dir = root / "docs" / "artefacts"
 
-    console.print(f"\n[bold]Full pipeline[/bold] for [cyan]{org}/{repo}[/cyan]\n")
+    get_console().print(f"\n[bold]Full pipeline[/bold] for [cyan]{org}/{repo}[/cyan]\n")
 
     # Step 1: Upload to NotebookLM
     if notebook_id:
         nb_id = notebook_id
-        console.rule("Step 1: Using existing notebook")
-        console.print(f"  Notebook: {nb_id}")
+        get_console().rule("Step 1: Using existing notebook")
+        get_console().print(f"  Notebook: {nb_id}")
     else:
-        console.rule("Step 1: Collect and upload")
+        get_console().rule("Step 1: Collect and upload")
         output_dir.mkdir(parents=True, exist_ok=True)
         md_path = output_dir / f"{repo}_content.md"
         collect_repo_content(root, md_path)
@@ -416,7 +391,7 @@ def pipeline(
         pdf_path.unlink(missing_ok=True)
 
     # Step 2: Resolve which artefacts to generate
-    console.rule("Step 2: Generate artefacts")
+    get_console().rule("Step 2: Generate artefacts")
 
     # Explicit includes take priority
     selected = [
@@ -438,7 +413,7 @@ def pipeline(
         bad = {e.lower() for e in exclude}
         unknown = bad - set(ALL_ARTEFACTS)
         if unknown:
-            console.print(
+            get_console().print(
                 f"[red]Unknown artefact types: {', '.join(unknown)}."
                 f" Valid: {', '.join(ALL_ARTEFACTS)}[/red]"
             )
@@ -452,50 +427,50 @@ def pipeline(
     if resume or (not selected and not exclude):
         already_done = asyncio.run(get_completed_artefacts(nb_id))
         if already_done:
-            console.print(
+            get_console().print(
                 f"  Already completed: [green]{', '.join(sorted(already_done))}[/green]"
             )
         target = [a for a in target if a not in already_done]
 
     if target:
-        console.print(f"  Generating: [bold]{', '.join(target)}[/bold]")
+        get_console().print(f"  Generating: [bold]{', '.join(target)}[/bold]")
         asyncio.run(generate_artefacts(nb_id, target, timeout=timeout))
     else:
-        console.print("  [green]All requested artefacts already generated[/green]")
+        get_console().print("  [green]All requested artefacts already generated[/green]")
 
     # Step 3: Download
-    console.rule("Step 3: Download artefacts")
+    get_console().rule("Step 3: Download artefacts")
     asyncio.run(download_artefacts(nb_id, output_dir))
 
     # Step 4: Check
-    console.rule("Step 4: Check artefacts")
+    get_console().rule("Step 4: Check artefacts")
     found = check_artefacts(output_dir)
     if not found:
-        console.print("[red]✗ No artefacts downloaded[/red]")
+        get_console().print("[red]✗ No artefacts downloaded[/red]")
         raise typer.Exit(1)
     for kind, path in found.items():
-        console.print(f"  [green]✓[/green] {kind}: {path.name}")
+        get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
 
     # Step 5: Pages
-    console.rule("Step 5: Setup GitHub Pages")
+    get_console().rule("Step 5: Setup GitHub Pages")
     url = setup_pages(root, org, repo)
 
     # Step 6: Push
-    console.rule("Step 6: Commit and push")
+    get_console().rule("Step 6: Commit and push")
     git_commit_and_push(
         root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
     )
 
     # Step 7: Verify
-    console.rule("Step 7: Verify deployment")
+    get_console().rule("Step 7: Verify deployment")
     verify_pages(url, max_wait=120)
 
     # Step 8: Cleanup
     if not keep_notebook:
-        console.rule("Step 8: Cleanup notebook")
-        console.print(f"  Deleting notebook {nb_id} (artefacts are now in the repo)")
+        get_console().rule("Step 8: Cleanup notebook")
+        get_console().print(f"  Deleting notebook {nb_id} (artefacts are now in the repo)")
         asyncio.run(delete_notebook(nb_id))
     else:
-        console.print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
+        get_console().print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
 
-    console.print(f"\n[bold green]✅ Pipeline complete![/bold green] {url}")
+    get_console().print(f"\n[bold green]✅ Pipeline complete![/bold green] {url}")

@@ -87,7 +87,7 @@ export GITHUB_TOKEN=ghp_your_token_here
 repo-artefacts pages .
 ```
 
-**Persistent fix:** Add to `~/.config/secrets/tokens.age` via `api-key-sync`.
+**Persistent fix:** Add to `~/.config/secrets/tokens.age` or store in your macOS Keychain.
 
 ### Audio/video won't play in browser
 
@@ -95,7 +95,7 @@ repo-artefacts pages .
 
 **Cause:** GitHub raw URLs don't support streaming. The player page (`index.html`) uses `<audio>` and `<video>` tags that stream from the Pages-hosted files.
 
-**Fix:** Use the GitHub Pages URL, not the raw GitHub URL. The README "Repo Deep Dive" links point to the Pages player which handles playback correctly.
+**Fix:** Use the GitHub Pages URL, not the raw GitHub URL. The README "Generated Artefacts" links point to the Pages player which handles playback correctly.
 
 ## NotebookLM Auth Issues
 
@@ -106,7 +106,7 @@ repo-artefacts pages .
 **Fix:**
 ```bash
 # Re-authenticate
-notebooklm auth
+notebooklm login
 ```
 
 This opens a browser for Google sign-in and stores cookies locally.
@@ -118,4 +118,4 @@ This opens a browser for Google sign-in and stores cookies locally.
 | `No GitHub remote found` | No `github.com` remote in git config | Use `--org` and `--repo` flags |
 | `Failed to spawn: pyright` | Missing dev dependency | `uv add --dev pyright` |
 | `age: no identity matched` | Wrong age key for tokens.age | Check `~/.config/age/keys.txt` |
-| `op: not signed in` | 1Password CLI session expired | Run `op_token` then retry |
+| `op: not signed in` | 1Password CLI session expired | Run `op signin` then retry |

@@ -24,65 +24,59 @@ ARTEFACTS_BLOCK_RE = re.compile(
     r"^<!-- ARTEFACTS:START -->(.+?)^<!-- ARTEFACTS:END -->", re.DOTALL | re.MULTILINE
 )
 
-errors: list[str] = []
 
-
-def check_artefacts_block(path: Path, content: str) -> None:
-    """Validate the ARTEFACTS block structure."""
+def check_artefacts_block(path: Path, content: str) -> list[str]:
+    """Validate the ARTEFACTS block structure. Returns list of errors."""
+    errors: list[str] = []
     m = ARTEFACTS_BLOCK_RE.search(content)
     if not m:
-        return  # No block — not an error (not all files have one)
+        return errors  # No block — not an error (not all files have one)
 
     block = m.group(1)
 
     if "## Generated Artefacts" not in block:
-        errors.append(
-            f"{path}: ARTEFACTS block missing '## Generated Artefacts' heading"
-        )
+        errors.append(f"{path}: ARTEFACTS block missing '## Generated Artefacts' heading")
 
     # Check table structure
     links = MARKDOWN_LINK_RE.findall(block)
     if len(links) < 4:
-        errors.append(
-            f"{path}: ARTEFACTS block has {len(links)} links, expected at least 4"
-        )
+        errors.append(f"{path}: ARTEFACTS block has {len(links)} links, expected at least 4")
 
-    for label, url in links:
+    for _label, url in links:
         if "github.io" in url:
-            check_pages_url(path, url)
+            errors.extend(check_pages_url(path, url))
+
+    return errors
 
 
-def check_pages_url(path: Path, url: str) -> None:
-    """Validate a GitHub Pages URL has a valid anchor."""
+def check_pages_url(path: Path, url: str) -> list[str]:
+    """Validate a GitHub Pages URL has a valid anchor. Returns list of errors."""
     from urllib.parse import urlparse
 
+    errors: list[str] = []
     parsed = urlparse(url)
     fragment = f"#{parsed.fragment}" if parsed.fragment else ""
     if fragment and fragment not in VALID_ANCHORS:
         errors.append(f"{path}: invalid anchor '{fragment}' in {url}")
-
-    if not parsed.path.endswith("/artefacts/") and not parsed.path.endswith(
-        "/artefacts"
-    ):
-        # Allow links to the repo itself
-        if "github.io" in parsed.netloc and "/artefacts" not in parsed.path:
-            return
+    return errors
 
 
-def check_relative_links(path: Path, content: str) -> None:
-    """Validate relative file links resolve."""
+def check_relative_links(path: Path, content: str) -> list[str]:
+    """Validate relative file links resolve. Returns list of errors."""
+    errors: list[str] = []
     for label, url in MARKDOWN_LINK_RE.findall(content):
         if url.startswith(("http://", "https://", "#", "mailto:")):
             continue
         target = (path.parent / url).resolve()
         if not target.exists():
             errors.append(f"{path}: broken relative link [{label}]({url})")
+    return errors
 
 
 def check_online(url: str) -> bool:
     """HEAD request to verify a URL is live."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     try:
         req = urllib.request.Request(url, method="HEAD")
@@ -93,27 +87,37 @@ def check_online(url: str) -> bool:
         return False
 
 
-def main() -> int:
-    online = "--online" in sys.argv
-    md_files = list(REPO_ROOT.glob("*.md")) + list((REPO_ROOT / "docs").glob("*.md"))
+def check_all(repo_root: Path | None = None, *, online: bool = False) -> list[str]:
+    """Run all checks. Returns aggregated error list."""
+    root = repo_root or REPO_ROOT
+    errors: list[str] = []
+    md_files = list(root.glob("*.md")) + list((root / "docs").glob("*.md"))
 
     for path in md_files:
         content = path.read_text(encoding="utf-8")
-        check_artefacts_block(path, content)
-        check_relative_links(path, content)
+        errors.extend(check_artefacts_block(path, content))
+        errors.extend(check_relative_links(path, content))
 
         if online:
             for _, url in MARKDOWN_LINK_RE.findall(content):
                 if "github.io" in url and not check_online(url.split("#")[0]):
                     errors.append(f"{path}: URL not reachable: {url}")
 
+    return errors
+
+
+def main() -> int:
+    online = "--online" in sys.argv
+    errors = check_all(online=online)
+
     if errors:
-        print(f"\n❌ {len(errors)} link issue(s) found:\n")
+        print(f"\n{len(errors)} link issue(s) found:\n")
         for e in errors:
-            print(f"  • {e}")
+            print(f"  - {e}")
         return 1
 
-    print(f"✅ All links valid across {len(md_files)} files")
+    md_count = len(list(REPO_ROOT.glob("*.md"))) + len(list((REPO_ROOT / "docs").glob("*.md")))
+    print(f"All links valid across {md_count} files")
     return 0
 
 

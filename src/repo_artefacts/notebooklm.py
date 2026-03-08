@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from enum import IntEnum
 from pathlib import Path
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from notebooklm import AudioFormat, GenerationStatus, NotebookLMClient, VideoStyle
 from notebooklm.exceptions import AuthError, RateLimitError, RPCError
-from rich.console import Console
 from rich.table import Table
 
-console = Console()
+from repo_artefacts.console import get_console
 
 T = TypeVar("T")
 
@@ -24,6 +26,130 @@ RATE_LIMIT_BACKOFF = [30, 60, 300]  # escalating backoff for rate limits
 QUOTA_ERROR_PATTERNS = ["rate limit", "quota exceeded", "quota"]
 
 
+# ---------------------------------------------------------------------------
+# Type definitions for NotebookLM API data
+# ---------------------------------------------------------------------------
+
+
+class ArtefactStatus(IntEnum):
+    """Status codes from the NotebookLM _list_raw API."""
+
+    QUEUED = 1
+    IN_PROGRESS = 2
+    COMPLETED = 3
+    FAILED = 4
+
+
+class ArtefactType(IntEnum):
+    """Type codes from the NotebookLM _list_raw API."""
+
+    AUDIO = 1
+    SLIDES = 3
+    INFOGRAPHIC = 7
+    VIDEO = 8
+
+
+# Mapping from artefact name to ArtefactType
+NAME_TO_TYPE: dict[str, ArtefactType] = {t.name.lower(): t for t in ArtefactType}
+
+
+@dataclass(frozen=True, slots=True)
+class RawArtefact:
+    """Parsed representation of a single _list_raw entry."""
+
+    id: str
+    type_code: ArtefactType
+    status: ArtefactStatus
+
+    @classmethod
+    def from_raw(cls, arr: list) -> RawArtefact | None:
+        """Parse a raw API array. Returns None if too short or unknown codes."""
+        if len(arr) <= 4:
+            return None
+        try:
+            return cls(
+                id=str(arr[0]),
+                type_code=ArtefactType(arr[2]),
+                status=ArtefactStatus(arr[4]),
+            )
+        except ValueError:
+            return None
+
+    @property
+    def is_completed(self) -> bool:
+        return self.status is ArtefactStatus.COMPLETED
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status is ArtefactStatus.FAILED
+
+    @property
+    def type_name(self) -> str:
+        """Lowercase name matching ARTEFACT_CONFIG keys."""
+        return self.type_code.name.lower()
+
+
+def _parse_raw_artefacts(raw: list) -> list[RawArtefact]:
+    """Parse all raw arrays, skipping entries that are too short or unknown."""
+    results = []
+    for arr in raw:
+        art = RawArtefact.from_raw(arr)
+        if art is not None:
+            results.append(art)
+    return results
+
+
+class DownloadSpec(NamedTuple):
+    label: str
+    list_method: str
+    download_method: str
+    filename: str
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+ARTEFACT_CONFIG: dict[str, dict[str, str]] = {
+    "audio": {
+        "instructions": "Create an engaging audio overview of this codebase, explaining its architecture, key components, and how they work together",
+        "method": "generate_audio",
+    },
+    "video": {
+        "instructions": "Create a visual explainer of this codebase architecture and key workflows",
+        "method": "generate_video",
+    },
+    "slides": {
+        "instructions": "Create a presentation covering the codebase architecture, key components, and workflows",
+        "method": "generate_slide_deck",
+    },
+    "infographic": {
+        "instructions": "Create an infographic showing the codebase architecture, module relationships, and key workflows",
+        "method": "generate_infographic",
+    },
+}
+
+# Extra kwargs per artefact type (only for types that need them)
+_GENERATE_KWARGS: dict[str, dict[str, object]] = {
+    "audio": {"audio_format": AudioFormat.DEEP_DIVE},
+    "video": {"video_style": VideoStyle.WHITEBOARD},
+}
+
+DOWNLOAD_MAP: list[DownloadSpec] = [
+    DownloadSpec("audio", "list_audio", "download_audio", "audio_overview.mp3"),
+    DownloadSpec("video", "list_video", "download_video", "video_overview.mp4"),
+    DownloadSpec("slides", "list_slide_decks", "download_slide_deck", "slides.pdf"),
+    DownloadSpec("infographic", "list_infographics", "download_infographic", "infographic.png"),
+]
+
+MAX_RETRIES = 3
+
+
+# ---------------------------------------------------------------------------
+# Auth retry wrapper
+# ---------------------------------------------------------------------------
+
+
 async def _with_reauth(
     client: NotebookLMClient,
     fn: Callable[[], Awaitable[T]],
@@ -32,9 +158,9 @@ async def _with_reauth(
     """Run an async call, refreshing auth/CSRF tokens on RPC errors.
 
     Handles three failure modes:
-    - AuthError: stale CSRF/session → refresh_auth + quick retry
-    - RateLimitError: throttled → exponential backoff then refresh + retry
-    - Other RPCError: transient server issue → refresh + retry
+    - AuthError: stale CSRF/session -> refresh_auth + quick retry
+    - RateLimitError: throttled -> exponential backoff then refresh + retry
+    - Other RPCError: transient server issue -> refresh + retry
     """
     last_exc: Exception | None = None
     backoffs = REAUTH_BACKOFF
@@ -45,25 +171,25 @@ async def _with_reauth(
         except RateLimitError as e:
             last_exc = e
             bk = RATE_LIMIT_BACKOFF[min(attempt - 1, len(RATE_LIMIT_BACKOFF) - 1)]
-            console.print(
+            get_console().print(
                 f"[yellow]⚠[/yellow] {label} rate limited — "
                 f"backoff {bk}s then re-auth (attempt {attempt}/{len(backoffs)})"
             )
             await asyncio.sleep(bk)
             await client.refresh_auth()
-            console.print("[green]✓[/green] Auth refreshed after rate limit")
+            get_console().print("[green]✓[/green] Auth refreshed after rate limit")
         except AuthError as e:
             last_exc = e
-            console.print(
+            get_console().print(
                 f"[yellow]⚠[/yellow] {label} auth/CSRF expired — "
                 f"refreshing (attempt {attempt}/{len(backoffs)})"
             )
             await asyncio.sleep(wait)
             await client.refresh_auth()
-            console.print("[green]✓[/green] Auth refreshed")
+            get_console().print("[green]✓[/green] Auth refreshed")
         except RPCError as e:
             last_exc = e
-            console.print(
+            get_console().print(
                 f"[yellow]⚠[/yellow] {label} RPC error: {e} — "
                 f"refreshing auth (attempt {attempt}/{len(backoffs)})"
             )
@@ -73,8 +199,8 @@ async def _with_reauth(
     # Final attempt after all backoffs exhausted
     try:
         return await fn()
-    except RPCError:
-        raise last_exc or RPCError(f"{label} failed after re-auth retries")  # type: ignore[call-arg]
+    except RPCError as exc:
+        raise (last_exc or RPCError(f"{label} failed after re-auth retries")) from exc  # type: ignore[call-arg]
 
 
 def _is_quota_error(error_msg: str) -> bool:
@@ -83,38 +209,16 @@ def _is_quota_error(error_msg: str) -> bool:
     return any(p in lower for p in QUOTA_ERROR_PATTERNS)
 
 
-ARTEFACT_CONFIG: dict[str, dict] = {
-    "audio": {
-        "instructions": "Create an engaging audio overview of this codebase, explaining its architecture, key components, and how they work together",
-        "timeout": 900,
-    },
-    "video": {
-        "instructions": "Create a visual explainer of this codebase architecture and key workflows",
-        "timeout": 900,
-    },
-    "slides": {
-        "instructions": "Create a presentation covering the codebase architecture, key components, and workflows",
-        "timeout": 900,
-    },
-    "infographic": {
-        "instructions": "Create an infographic showing the codebase architecture, module relationships, and key workflows",
-        "timeout": 900,
-    },
-}
-
-DOWNLOAD_MAP = [
-    ("audio", "list_audio", "download_audio", "audio_overview.mp3"),
-    ("video", "list_video", "download_video", "video_overview.mp4"),
-    ("slides", "list_slide_decks", "download_slide_deck", "slides.pdf"),
-    ("infographic", "list_infographics", "download_infographic", "infographic.png"),
-]
+# ---------------------------------------------------------------------------
+# Upload
+# ---------------------------------------------------------------------------
 
 
 async def upload_repo(
     content_path: Path,
     repo_name: str,
     notebook_id: str | None = None,
-) -> dict:
+) -> dict[str, str]:
     """Upload collected repo content to a NotebookLM notebook.
 
     Checks for existing notebook with matching title before creating a new one.
@@ -126,7 +230,7 @@ async def upload_repo(
         if notebook_id:
             nb_id = notebook_id
             nb_title = repo_name
-            console.print(f"Using existing notebook: [bold]{nb_id}[/bold]")
+            get_console().print(f"Using existing notebook: [bold]{nb_id}[/bold]")
         else:
             notebooks = await _with_reauth(
                 client, lambda: client.notebooks.list(), "list notebooks"
@@ -135,9 +239,7 @@ async def upload_repo(
             if existing:
                 nb_id = existing.id
                 nb_title = existing.title
-                console.print(
-                    f"Found existing notebook: [bold]{nb_title}[/bold] ({nb_id})"
-                )
+                get_console().print(f"Found existing notebook: [bold]{nb_title}[/bold] ({nb_id})")
             else:
                 notebook = await _with_reauth(
                     client,
@@ -146,19 +248,21 @@ async def upload_repo(
                 )
                 nb_id = notebook.id
                 nb_title = notebook.title
-                console.print(f"Created notebook: [bold]{nb_title}[/bold] ({nb_id})")
+                get_console().print(f"Created notebook: [bold]{nb_title}[/bold] ({nb_id})")
 
         await _with_reauth(
             client,
             lambda: client.sources.add_file(nb_id, content_path),
             "upload source",
         )
-        console.print(f"  [green]✓[/green] Uploaded {content_path.name}")
+        get_console().print(f"  [green]✓[/green] Uploaded {content_path.name}")
 
     return {"id": nb_id, "title": nb_title}
 
 
-MAX_RETRIES = 3
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
 
 
 async def _request_artefact(
@@ -166,53 +270,33 @@ async def _request_artefact(
 ) -> GenerationStatus:
     """Fire off a single generation request with re-auth on failure."""
     cfg = ARTEFACT_CONFIG[artefact]
+    extra_kwargs = _GENERATE_KWARGS.get(artefact, {})
 
     async def _do() -> GenerationStatus:
-        if artefact == "audio":
-            return await client.artifacts.generate_audio(
-                notebook_id,
-                instructions=cfg["instructions"],
-                audio_format=AudioFormat.DEEP_DIVE,
-            )
-        elif artefact == "video":
-            return await client.artifacts.generate_video(
-                notebook_id,
-                instructions=cfg["instructions"],
-                video_style=VideoStyle.WHITEBOARD,
-            )
-        elif artefact == "slides":
-            return await client.artifacts.generate_slide_deck(
-                notebook_id,
-                instructions=cfg["instructions"],
-            )
-        elif artefact == "infographic":
-            return await client.artifacts.generate_infographic(
-                notebook_id,
-                instructions=cfg["instructions"],
-            )
-        else:
-            raise ValueError(f"Unknown artefact type: {artefact}")
+        method = getattr(client.artifacts, cfg["method"])
+        return await method(
+            notebook_id,
+            instructions=cfg["instructions"],
+            **extra_kwargs,
+        )
 
     return await _with_reauth(client, _do, artefact)
-
-
-ARTEFACT_TYPE_CODE = {"audio": 1, "video": 8, "slides": 3, "infographic": 7}
 
 
 async def _delete_failed_by_type(
     client: NotebookLMClient, notebook_id: str, artefact: str
 ) -> None:
     """Delete any failed artefacts of the given type (required before retry)."""
-    type_code = ARTEFACT_TYPE_CODE[artefact]
+    artefact_type = NAME_TO_TYPE[artefact]
     raw = await _with_reauth(
         client, lambda: client.artifacts._list_raw(notebook_id), f"list {artefact}"
     )
-    for art in raw:
-        if len(art) > 4 and art[2] == type_code and art[4] == 4:  # FAILED
-            console.print(f"  [dim]Deleting failed {artefact} ({art[0][:12]}...)[/dim]")
+    for art in _parse_raw_artefacts(raw):
+        if art.type_code is artefact_type and art.is_failed:
+            get_console().print(f"  [dim]Deleting failed {artefact} ({art.id[:12]}...)[/dim]")
             await _with_reauth(
                 client,
-                lambda aid=art[0]: client.artifacts.delete(notebook_id, aid),
+                lambda aid=art.id: client.artifacts.delete(notebook_id, aid),
                 f"delete {artefact}",
             )
 
@@ -224,13 +308,10 @@ async def _snapshot_artefact_ids(
     raw = await _with_reauth(
         client, lambda: client.artifacts._list_raw(notebook_id), "snapshot artefacts"
     )
-    code_to_name = {v: k for k, v in ARTEFACT_TYPE_CODE.items()}
-    result: dict[str, set[str]] = {name: set() for name in ARTEFACT_TYPE_CODE}
-    for art in raw:
-        if len(art) > 2:
-            name = code_to_name.get(art[2])
-            if name:
-                result[name].add(art[0])
+    result: dict[str, set[str]] = {name: set() for name in ARTEFACT_CONFIG}
+    for art in _parse_raw_artefacts(raw):
+        if art.type_name in result:
+            result[art.type_name].add(art.id)
     return result
 
 
@@ -242,14 +323,7 @@ async def get_completed_artefacts(notebook_id: str) -> set[str]:
             lambda: client.artifacts._list_raw(notebook_id),
             "check completed",
         )
-    code_to_name = {v: k for k, v in ARTEFACT_TYPE_CODE.items()}
-    completed: set[str] = set()
-    for art in raw:
-        if len(art) > 4 and art[4] == 3:  # COMPLETED
-            name = code_to_name.get(art[2])
-            if name:
-                completed.add(name)
-    return completed
+    return {art.type_name for art in _parse_raw_artefacts(raw) if art.is_completed}
 
 
 async def _poll_by_type(
@@ -259,33 +333,33 @@ async def _poll_by_type(
     known_ids: set[str],
 ) -> str:
     """Find a new or changed artefact of the given type. Returns status string."""
-    type_code = ARTEFACT_TYPE_CODE[artefact]
+    artefact_type = NAME_TO_TYPE[artefact]
     raw = await _with_reauth(
         client, lambda: client.artifacts._list_raw(notebook_id), f"poll {artefact}"
     )
-    for art in raw:
-        if len(art) > 4 and art[2] == type_code:
-            status_code = art[4]
-            if art[0] not in known_ids or status_code in (3, 4):
-                # New artefact or status changed
-                if status_code == 3:
-                    return "completed"
-                elif status_code == 4:
-                    return "failed"
-                elif status_code in (1, 2):
-                    return "in_progress"
+    for art in _parse_raw_artefacts(raw):
+        if art.type_code is not artefact_type:
+            continue
+        if art.id not in known_ids or art.status in (
+            ArtefactStatus.COMPLETED,
+            ArtefactStatus.FAILED,
+        ):
+            if art.is_completed:
+                return "completed"
+            if art.is_failed:
+                return "failed"
+            if art.status in (ArtefactStatus.QUEUED, ArtefactStatus.IN_PROGRESS):
+                return "in_progress"
     return "in_progress"
 
 
-async def generate_artefacts(
-    notebook_id: str, artefacts: list[str], timeout: int = 900
-) -> None:
-    """Generate requested artefact types concurrently with retry on failure.
+async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: int = 900) -> None:
+    """Generate requested artefact types with retry on failure.
 
     Handles three failure modes:
-    - Daily quota exhaustion (infographics/slides have stricter caps) → bail early
-    - Stale auth/CSRF → refresh_auth + retry
-    - Transient RPC errors → backoff + retry
+    - Daily quota exhaustion (infographics/slides have stricter caps) -> bail early
+    - Stale auth/CSRF -> refresh_auth + retry
+    - Transient RPC errors -> backoff + retry
 
     Polls by artefact type (not task_id) because the NotebookLM API returns
     different IDs for generation tasks vs completed artefacts.
@@ -298,7 +372,7 @@ async def generate_artefacts(
         quota_exhausted: set[str] = set()
 
         for artefact in artefacts:
-            console.print(f"[blue]⏳[/blue] Requesting {artefact}...")
+            get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
             try:
                 await _delete_failed_by_type(client, notebook_id, artefact)
                 status = await _request_artefact(client, notebook_id, artefact)
@@ -307,7 +381,7 @@ async def generate_artefacts(
                     if _is_quota_error(err):
                         # Refresh auth and try once more to distinguish
                         # quota exhaustion from stale CSRF
-                        console.print(
+                        get_console().print(
                             f"[yellow]⚠[/yellow] {artefact} rejected ({err})"
                             " — refreshing auth to confirm..."
                         )
@@ -316,7 +390,7 @@ async def generate_artefacts(
                         status = await _request_artefact(client, notebook_id, artefact)
                         if status.is_failed or not status.task_id:
                             quota_exhausted.add(artefact)
-                            console.print(
+                            get_console().print(
                                 f"[red]✗[/red] {artefact}: daily quota exhausted"
                                 " (NotebookLM caps infographics/slides"
                                 " separately). Retry after 24h reset."
@@ -327,7 +401,7 @@ async def generate_artefacts(
                             pending.add(artefact)
                             continue
                     retries[artefact] += 1
-                    console.print(
+                    get_console().print(
                         f"[yellow]⚠[/yellow] {artefact} failed immediately"
                         f" ({err})"
                         f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
@@ -337,7 +411,7 @@ async def generate_artefacts(
                     pending.add(artefact)
             except Exception as e:
                 retries[artefact] += 1
-                console.print(
+                get_console().print(
                     f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
                     f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
                 )
@@ -346,40 +420,36 @@ async def generate_artefacts(
         needs_retry = [
             a
             for a in artefacts
-            if a not in pending
-            and a not in quota_exhausted
-            and retries[a] <= MAX_RETRIES
+            if a not in pending and a not in quota_exhausted and retries[a] <= MAX_RETRIES
         ]
 
-        elapsed = 0
+        start_time = time.monotonic()
+        deadline = start_time + timeout
         poll_interval = 30
 
-        console.print(
-            f"[dim]Timeout: {timeout}s ({timeout // 60}min),"
-            f" max retries: {MAX_RETRIES}[/dim]"
+        get_console().print(
+            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]"
         )
 
-        while (pending or needs_retry) and elapsed < timeout:
+        while (pending or needs_retry) and time.monotonic() < deadline:
             # Retry any queued failures — refresh auth + backoff first
             for label in list(needs_retry):
-                backoff = RATE_LIMIT_BACKOFF[
-                    min(retries[label] - 1, len(RATE_LIMIT_BACKOFF) - 1)
-                ]
-                console.print(
+                backoff = RATE_LIMIT_BACKOFF[min(retries[label] - 1, len(RATE_LIMIT_BACKOFF) - 1)]
+                get_console().print(
                     f"[blue]⏳[/blue] Retrying {label}"
                     f" ({retries[label]}/{MAX_RETRIES})"
                     f" — backoff {backoff}s + auth refresh..."
                 )
                 await asyncio.sleep(backoff)
                 await client.refresh_auth()
-                console.print("[green]✓[/green] Auth refreshed")
+                get_console().print("[green]✓[/green] Auth refreshed")
                 try:
                     await _delete_failed_by_type(client, notebook_id, label)
                     status = await _request_artefact(client, notebook_id, label)
                     if status.is_failed or not status.task_id:
                         retries[label] += 1
                         if retries[label] > MAX_RETRIES:
-                            console.print(
+                            get_console().print(
                                 f"[red]✗[/red] {label} failed after"
                                 f" {MAX_RETRIES} retries: {status.error}"
                             )
@@ -391,9 +461,8 @@ async def generate_artefacts(
                 except Exception as e:
                     retries[label] += 1
                     if retries[label] > MAX_RETRIES:
-                        console.print(
-                            f"[red]✗[/red] {label} failed after"
-                            f" {MAX_RETRIES} retries: {e}"
+                        get_console().print(
+                            f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries: {e}"
                         )
                         needs_retry.remove(label)
 
@@ -401,49 +470,47 @@ async def generate_artefacts(
                 break
 
             await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
 
             # Poll by artefact type (not task_id — they don't match)
+            elapsed = int(time.monotonic() - start_time)
             for label in list(pending):
                 try:
                     status_str = await _poll_by_type(
                         client, notebook_id, label, before.get(label, set())
                     )
                 except Exception as e:
-                    console.print(
-                        f"[yellow]⚠[/yellow] Poll error for {label}: {e}"
-                        " — refreshing auth"
+                    get_console().print(
+                        f"[yellow]⚠[/yellow] Poll error for {label}: {e} — refreshing auth"
                     )
                     await client.refresh_auth()
                     continue
 
                 if status_str == "completed":
-                    console.print(f"[green]✓[/green] {label.capitalize()} ready")
+                    get_console().print(f"[green]✓[/green] {label.capitalize()} ready")
                     pending.discard(label)
                 elif status_str == "failed":
                     pending.discard(label)
                     retries[label] += 1
                     if retries[label] <= MAX_RETRIES:
-                        console.print(
+                        get_console().print(
                             f"[yellow]⚠[/yellow] {label} failed"
                             f" — queued retry ({retries[label]}/{MAX_RETRIES})"
                         )
-                        needs_retry.append(label)
+                        if label not in needs_retry:
+                            needs_retry.append(label)
                     else:
-                        console.print(
+                        get_console().print(
                             f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries"
                         )
                 else:
-                    console.print(
-                        f"[dim]  … {label} still generating ({elapsed}s)[/dim]"
-                    )
+                    get_console().print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
 
         for label in list(pending) + needs_retry:
-            console.print(f"[red]✗[/red] {label.capitalize()} timed out")
+            get_console().print(f"[red]✗[/red] {label.capitalize()} timed out")
 
         if quota_exhausted:
-            console.print(
-                f"\n[yellow]ℹ[/yellow] Quota-limited artefacts: "
+            get_console().print(
+                f"\n[yellow]i[/yellow] Quota-limited artefacts: "
                 f"[bold]{', '.join(sorted(quota_exhausted))}[/bold]"
                 "\n  NotebookLM enforces separate daily caps for"
                 " infographics (~20-25/day Pro) and slides."
@@ -452,7 +519,12 @@ async def generate_artefacts(
                 f" {''.join(f' --{a}' for a in sorted(quota_exhausted))}"
             )
 
-    console.print("[bold green]Done.[/bold green]")
+    get_console().print("[bold green]Done.[/bold green]")
+
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
 
 
 async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
@@ -471,7 +543,7 @@ async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
             # Skip failed artefacts
             ready = [i for i in items if i.is_completed]
             if not ready:
-                console.print(
+                get_console().print(
                     f"[yellow]⚠[/yellow] {label}: exists but not ready (failed or processing), skipping"
                 )
                 continue
@@ -479,12 +551,12 @@ async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
                 path = str(output_dir / filename)
                 await _with_reauth(
                     client,
-                    lambda dm=dl_method, p=path, aid=ready[0].id: getattr(
-                        client.artifacts, dm
-                    )(notebook_id, p, artifact_id=aid),
+                    lambda dm=dl_method, p=path, aid=ready[0].id: getattr(client.artifacts, dm)(
+                        notebook_id, p, artifact_id=aid
+                    ),
                     f"download {label}",
                 )
-                console.print(f"[green]✓[/green] Downloaded {path}")
+                get_console().print(f"[green]✓[/green] Downloaded {path}")
             else:
                 stem, ext = filename.rsplit(".", 1)
                 for i, artifact in enumerate(ready, 1):
@@ -496,17 +568,20 @@ async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
                         )(notebook_id, p, artifact_id=aid),
                         f"download {label}",
                     )
-                    console.print(f"[green]✓[/green] Downloaded {path}")
+                    get_console().print(f"[green]✓[/green] Downloaded {path}")
 
-    console.print(f"[bold green]Done.[/bold green] Files saved to {output_dir}")
+    get_console().print(f"[bold green]Done.[/bold green] Files saved to {output_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Notebook management
+# ---------------------------------------------------------------------------
 
 
 async def list_notebooks() -> None:
     """List all NotebookLM notebooks with source counts."""
     async with await NotebookLMClient.from_storage() as client:
-        notebooks = await _with_reauth(
-            client, lambda: client.notebooks.list(), "list notebooks"
-        )
+        notebooks = await _with_reauth(client, lambda: client.notebooks.list(), "list notebooks")
         rows = []
         for nb in notebooks:
             sources = await _with_reauth(
@@ -520,7 +595,7 @@ async def list_notebooks() -> None:
     table.add_column("Sources", justify="right")
     for row in rows:
         table.add_row(*row)
-    console.print(table)
+    get_console().print(table)
 
 
 async def list_sources(notebook_id: str) -> None:
@@ -536,13 +611,11 @@ async def list_sources(notebook_id: str) -> None:
     table.add_column("Title", style="bold")
     for i, src in enumerate(sources, 1):
         table.add_row(str(i), src.id, src.title)
-    console.print(table)
+    get_console().print(table)
 
 
 async def delete_notebook(notebook_id: str) -> None:
     """Delete a notebook and all its contents."""
     async with await NotebookLMClient.from_storage() as client:
-        await _with_reauth(
-            client, lambda: client.notebooks.delete(notebook_id), "delete notebook"
-        )
-        console.print(f"[green]✓[/green] Deleted notebook {notebook_id}")
+        await _with_reauth(client, lambda: client.notebooks.delete(notebook_id), "delete notebook")
+        get_console().print(f"[green]✓[/green] Deleted notebook {notebook_id}")

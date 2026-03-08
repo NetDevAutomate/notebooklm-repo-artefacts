@@ -1,9 +1,15 @@
-"""Tests for repo_artefacts.pages module."""
+"""Tests for repo_artefacts.pages module (including token resolution)."""
 
+from __future__ import annotations
+
+import re
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_artefacts.pages import README_BLOCK, get_github_info, setup_pages
+from repo_artefacts.pages import README_BLOCK, get_github_info, get_github_token, setup_pages
+
+# --- get_github_info ---
 
 
 def test_get_github_info(tmp_path: Path) -> None:
@@ -22,6 +28,9 @@ def test_get_github_info_https(tmp_path: Path) -> None:
         org, repo = get_github_info(tmp_path)
     assert org == "MyOrg"
     assert repo == "my-repo"
+
+
+# --- setup_pages ---
 
 
 def test_setup_pages_creates_files(tmp_path: Path) -> None:
@@ -45,9 +54,7 @@ def test_setup_pages_creates_files(tmp_path: Path) -> None:
 def test_setup_pages_updates_existing_block(tmp_path: Path) -> None:
     """setup_pages replaces existing ARTEFACTS block."""
     readme = tmp_path / "README.md"
-    readme.write_text(
-        "# Test\n\n<!-- ARTEFACTS:START -->\nold\n<!-- ARTEFACTS:END -->\n"
-    )
+    readme.write_text("# Test\n\n<!-- ARTEFACTS:START -->\nold\n<!-- ARTEFACTS:END -->\n")
 
     with patch("repo_artefacts.pages.enable_github_pages", return_value=True):
         setup_pages(tmp_path, "Org", "repo")
@@ -57,7 +64,7 @@ def test_setup_pages_updates_existing_block(tmp_path: Path) -> None:
     assert "## Generated Artefacts" in updated
 
 
-# --- README block structure tests ---
+# --- README block structure ---
 
 
 def test_readme_block_has_correct_heading() -> None:
@@ -86,8 +93,6 @@ def test_readme_block_has_four_artefact_links() -> None:
 
 def test_readme_block_anchors_match_player() -> None:
     """Anchors in README_BLOCK match the index.html section IDs."""
-    import re
-
     block = README_BLOCK.format(base_url="https://x.github.io/r/artefacts/")
     urls = re.findall(r"\(https://[^)]+\)", block)
     valid_anchors = {"", "#video", "#infographic", "#slides"}
@@ -107,3 +112,41 @@ def test_readme_block_table_format() -> None:
     table_lines = [line for line in lines if line.startswith("|")]
     # Header row + separator + 4 data rows = 6
     assert len(table_lines) == 6
+
+
+# --- Token resolution ---
+
+
+def test_token_from_env() -> None:
+    """GITHUB_TOKEN env var is first priority."""
+    with patch.dict("os.environ", {"GITHUB_TOKEN": "ghp_test123"}):
+        assert get_github_token() == "ghp_test123"
+
+
+def test_token_from_age_file(tmp_path: Path) -> None:
+    """Falls back to tokens.age when env var not set."""
+    age_output = 'export GITHUB_TOKEN="ghp_from_age"\nexport OTHER="val"\n'
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch("repo_artefacts.pages.Path.home", return_value=tmp_path),
+    ):
+        # Create fake age files
+        (tmp_path / ".config" / "secrets").mkdir(parents=True)
+        (tmp_path / ".config" / "secrets" / "tokens.age").write_text("encrypted")
+        (tmp_path / ".config" / "age").mkdir(parents=True)
+        (tmp_path / ".config" / "age" / "keys.txt").write_text("key")
+
+        with patch("subprocess.check_output", return_value=age_output):
+            assert get_github_token() == "ghp_from_age"
+
+
+def test_token_returns_none_when_nothing_available() -> None:
+    """Returns None when no token source is available."""
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch(
+            "subprocess.check_output",
+            side_effect=subprocess.CalledProcessError(1, "cmd"),
+        ),
+    ):
+        assert get_github_token() is None

@@ -145,6 +145,10 @@ Selection modes (pick one):
 
 Use `pipeline` for a fresh repo you haven't touched. Use `publish` when you already have a notebook and want more control over individual steps.
 
+## Git Safety
+
+The pipeline respects your repository's pre-commit hooks during the commit step. Only `docs/artefacts/` and `README.md` are staged — other files in your working tree are never touched. If the tool detects a detached HEAD state, it will refuse to push rather than silently targeting a default branch.
+
 ## CI Integration
 
 The pipeline is designed to run locally. For CI, use the individual commands — see [CI & Testing](ci-and-testing.md) for the GitHub Actions workflow and `act` for local CI runs.

@@ -32,7 +32,7 @@ graph LR
     subgraph "Git Repository"
         direction TB
         R[docs/artefacts/]
-        R --> A1[audio_overview.m4a]
+        R --> A1[audio_overview.mp3]
         R --> A2[video_overview.mp4]
         R --> A3[infographic.png]
         R --> A4[slides.pdf]
@@ -42,7 +42,7 @@ graph LR
     subgraph "GitHub Pages"
         direction TB
         P["org.github.io/repo/artefacts/"]
-        P --> B1[audio_overview.m4a]
+        P --> B1[audio_overview.mp3]
         P --> B2[video_overview.mp4]
         P --> B3[infographic.png]
         P --> B4[slides.pdf]

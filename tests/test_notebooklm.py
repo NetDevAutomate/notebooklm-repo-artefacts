@@ -9,10 +9,14 @@ import pytest
 
 from repo_artefacts.notebooklm import (
     ARTEFACT_CONFIG,
-    ARTEFACT_TYPE_CODE,
     DOWNLOAD_MAP,
     MAX_RETRIES,
+    NAME_TO_TYPE,
+    ArtefactStatus,
+    ArtefactType,
+    RawArtefact,
     _delete_failed_by_type,
+    _parse_raw_artefacts,
     _poll_by_type,
     _request_artefact,
     _snapshot_artefact_ids,
@@ -34,6 +38,55 @@ class FakeStatus:
         return self.status == "failed"
 
 
+# --- Type definitions ---
+
+
+def test_artefact_status_values() -> None:
+    assert ArtefactStatus.COMPLETED == 3
+    assert ArtefactStatus.FAILED == 4
+    assert ArtefactStatus(3) is ArtefactStatus.COMPLETED
+
+
+def test_artefact_type_values() -> None:
+    assert ArtefactType.AUDIO == 1
+    assert ArtefactType.VIDEO == 8
+
+
+def test_name_to_type_covers_config() -> None:
+    assert set(NAME_TO_TYPE.keys()) == set(ARTEFACT_CONFIG.keys())
+
+
+def test_raw_artefact_from_raw_valid() -> None:
+    art = RawArtefact.from_raw(["id-1", None, 1, None, 3])
+    assert art is not None
+    assert art.id == "id-1"
+    assert art.type_code is ArtefactType.AUDIO
+    assert art.status is ArtefactStatus.COMPLETED
+    assert art.is_completed
+    assert art.type_name == "audio"
+
+
+def test_raw_artefact_from_raw_too_short() -> None:
+    assert RawArtefact.from_raw(["id-1", None]) is None
+
+
+def test_raw_artefact_from_raw_unknown_type() -> None:
+    assert RawArtefact.from_raw(["id-1", None, 99, None, 3]) is None
+
+
+def test_parse_raw_artefacts_filters() -> None:
+    raw = [
+        ["id-1", None, 1, None, 3],  # valid: audio completed
+        ["id-2", None],  # too short
+        ["id-3", None, 99, None, 3],  # unknown type
+        ["id-4", None, 8, None, 4],  # valid: video failed
+    ]
+    result = _parse_raw_artefacts(raw)
+    assert len(result) == 2
+    assert result[0].id == "id-1"
+    assert result[1].id == "id-4"
+
+
 # --- Config validation ---
 
 
@@ -41,12 +94,14 @@ def test_artefact_config_has_all_types() -> None:
     assert set(ARTEFACT_CONFIG.keys()) == {"audio", "video", "slides", "infographic"}
 
 
-def test_artefact_type_codes_match_config() -> None:
-    assert set(ARTEFACT_TYPE_CODE.keys()) == set(ARTEFACT_CONFIG.keys())
+def test_artefact_config_has_method_key() -> None:
+    for name, cfg in ARTEFACT_CONFIG.items():
+        assert "method" in cfg, f"{name} missing 'method'"
+        assert "instructions" in cfg, f"{name} missing 'instructions'"
 
 
 def test_download_map_covers_all_types() -> None:
-    labels = {entry[0] for entry in DOWNLOAD_MAP}
+    labels = {entry.label for entry in DOWNLOAD_MAP}
     assert labels == {"audio", "video", "slides", "infographic"}
 
 
@@ -57,7 +112,7 @@ def test_download_map_filenames_are_standard() -> None:
         "slides.pdf",
         "infographic.png",
     }
-    actual = {entry[3] for entry in DOWNLOAD_MAP}
+    actual = {entry.filename for entry in DOWNLOAD_MAP}
     assert actual == expected
 
 
@@ -68,7 +123,6 @@ def test_max_retries_is_reasonable() -> None:
 # --- Snapshot ---
 
 
-@pytest.mark.asyncio
 async def test_snapshot_artefact_ids() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(
@@ -86,7 +140,6 @@ async def test_snapshot_artefact_ids() -> None:
 # --- Poll by type ---
 
 
-@pytest.mark.asyncio
 async def test_poll_by_type_detects_completion() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(return_value=[["new-id", None, 1, None, 3]])
@@ -94,7 +147,6 @@ async def test_poll_by_type_detects_completion() -> None:
     assert status == "completed"
 
 
-@pytest.mark.asyncio
 async def test_poll_by_type_detects_failure() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(return_value=[["new-id", None, 7, None, 4]])
@@ -102,7 +154,6 @@ async def test_poll_by_type_detects_failure() -> None:
     assert status == "failed"
 
 
-@pytest.mark.asyncio
 async def test_poll_by_type_in_progress() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(return_value=[["new-id", None, 8, None, 1]])
@@ -110,7 +161,6 @@ async def test_poll_by_type_in_progress() -> None:
     assert status == "in_progress"
 
 
-@pytest.mark.asyncio
 async def test_poll_by_type_known_completed_still_reported() -> None:
     """Known completed IDs still report completed status."""
     client = MagicMock()
@@ -122,7 +172,6 @@ async def test_poll_by_type_known_completed_still_reported() -> None:
 # --- Delete failed ---
 
 
-@pytest.mark.asyncio
 async def test_delete_failed_by_type() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(
@@ -136,7 +185,6 @@ async def test_delete_failed_by_type() -> None:
     client.artifacts.delete.assert_called_once_with("nb-1", "bad-id")
 
 
-@pytest.mark.asyncio
 async def test_delete_failed_skips_non_failed() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(return_value=[["ok-id", None, 1, None, 3]])
@@ -148,7 +196,6 @@ async def test_delete_failed_skips_non_failed() -> None:
 # --- Request artefact ---
 
 
-@pytest.mark.asyncio
 async def test_request_artefact_audio() -> None:
     client = MagicMock()
     client.artifacts.generate_audio = AsyncMock(return_value=FakeStatus())
@@ -157,7 +204,6 @@ async def test_request_artefact_audio() -> None:
     client.artifacts.generate_audio.assert_called_once()
 
 
-@pytest.mark.asyncio
 async def test_request_artefact_invalid_type() -> None:
     client = MagicMock()
     with pytest.raises(KeyError):

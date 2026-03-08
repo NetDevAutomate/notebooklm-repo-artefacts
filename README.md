@@ -41,7 +41,7 @@ playwright install chromium
 For NotebookLM features (`process`, `list`, `generate`, `download`, `delete`), authenticate first:
 
 ```bash
-pip install notebooklm-py[browser]
+uv pip install notebooklm-py[browser]
 notebooklm login
 ```
 
@@ -126,13 +126,6 @@ repo-artefacts pages /path/to/repo
 repo-artefacts pages /path/to/repo --org MyOrg --repo my-repo
 ```
 
-### `update-readme` — Manually update README artefacts section
-
-```bash
-repo-artefacts update-readme
-repo-artefacts update-readme -r ./README.md -a ./docs/artefacts
-```
-
 ### Using `NOTEBOOK_ID` environment variable
 
 All commands that accept `-n NOTEBOOK_ID` also read from the `NOTEBOOK_ID` environment variable:
@@ -157,12 +150,12 @@ repo-artefacts download -o ./docs/artefacts
 | `--all` | generate | Generate all artefact types (default if none specified) | — |
 | `-t, --timeout` | generate, publish, pipeline | Timeout in seconds per artefact | `900` |
 | `--exclude` | pipeline | Artefact types to skip (repeatable) | — |
-| `--resume` | pipeline | Only generate artefacts not yet completed | `false` |
+| `--resume` | pipeline | Only generate artefacts not yet completed (note: default mode already skips completed artefacts) | `false` |
 | `--keep-notebook` | pipeline | Don't delete the notebook after publishing | `false` |
+| `-r, --remote` | publish, pipeline | Git remote to push to | `origin` |
 | `--skip-generate` | publish | Skip artefact generation (use existing files) | `false` |
 | `--skip-verify` | publish | Skip page verification | `false` |
-| `-r, --readme` | update-readme | Path to README.md | `./README.md` |
-| `-a, --artefacts-dir` | update-readme | Path to artefacts directory | `./docs/artefacts` |
+| `--verify-timeout` | publish | Max seconds to wait for Pages deployment | `120` |
 
 ## What Gets Collected
 

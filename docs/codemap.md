@@ -18,7 +18,6 @@ graph LR
         NLM[notebooklm.py<br/>API integration]
         PG[pages.py<br/>GitHub Pages setup]
         PUB[publish.py<br/>E2E workflow]
-        RU[readme_updater.py<br/>README injection]
     end
 
     subgraph "External Services"
@@ -28,7 +27,7 @@ graph LR
     end
 
     subgraph "Output"
-        AUDIO[audio_overview.m4a]
+        AUDIO[audio_overview.mp3]
         VIDEO[video_overview.mp4]
         SLIDES[slides.pdf]
         INFOG[infographic.png]
@@ -42,9 +41,8 @@ graph LR
     NLM --> AUDIO & VIDEO & SLIDES & INFOG
     PG --> GHAPI
     PG --> HTML
-    PG --> RU
     PUB --> COL & NLM & PG
-    CLI --> COL & NLM & PG & PUB & RU
+    CLI --> COL & NLM & PG & PUB
 ```
 
 ## Module Breakdown
@@ -60,7 +58,6 @@ Entry point for all CLI commands. Uses [Typer](https://typer.tiangolo.com/) for 
 | `download` | Download artefacts to local disk | `notebooklm` |
 | `list` | List notebooks or sources | `notebooklm` |
 | `delete` | Delete a notebook | `notebooklm` |
-| `update-readme` | Update README with artefact links | `readme_updater` |
 | `pages` | Set up GitHub Pages player | `pages` |
 | `publish` | Generate → pages → push → verify | `notebooklm` → `pages` → `publish` |
 | `pipeline` | Full E2E: upload → generate → download → pages → push → verify → cleanup | `collector` → `notebooklm` → `pages` → `publish` |
@@ -173,10 +170,6 @@ graph TD
     K --> L
 ```
 
-### readme_updater.py — README Injection
-
-Scans `docs/artefacts/` for files and injects a listing between `<!-- ARTEFACTS:START -->` and `<!-- ARTEFACTS:END -->` markers. Used by the `download` command for basic file listings (the `pages` command uses its own table-based format).
-
 ## CI Pipeline
 
 GitHub Actions runs on every push/PR to `main`. Can be run locally with [`act`](https://github.com/nektos/act).
@@ -212,7 +205,6 @@ See [CI & Testing](ci-and-testing.md) for `act` setup and local testing.
 | `notebooklm` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `list_*()`, `delete_notebook()` | `cli.*`, `publish`, `pipeline` |
 | `pages` | `get_github_info()`, `get_github_token()`, `setup_pages()`, `enable_github_pages()` | `cli.pages`, `cli.publish`, `cli.pipeline` |
 | `publish` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()` | `cli.publish`, `cli.pipeline` |
-| `readme_updater` | `update_readme_artefacts()` | `cli.update-readme`, `cli.download` |
 
 ## Dependencies
 
@@ -222,7 +214,6 @@ graph BT
     CLI --> NLM[notebooklm.py]
     CLI --> PG[pages.py]
     CLI --> PUB[publish.py]
-    CLI --> RU[readme_updater.py]
     PUB --> NLM
     PUB --> PG
 

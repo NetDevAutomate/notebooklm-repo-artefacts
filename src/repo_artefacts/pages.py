@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as html_mod
 import importlib.resources
 import json
 import os
@@ -11,9 +12,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from rich.console import Console
-
-console = Console()
+from repo_artefacts.console import get_console
+from repo_artefacts.exceptions import GitRemoteError
 
 README_BLOCK = """\
 <!-- ARTEFACTS:START -->
@@ -39,7 +39,7 @@ def get_github_info(repo_root: Path) -> tuple[str, str]:
         m = re.search(r"github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?(?:\s|$)", line)
         if m:
             return m.group(1), m.group(2)
-    raise SystemExit("No GitHub remote found. Use --org and --repo.")
+    raise GitRemoteError("No GitHub remote found. Use --org and --repo.")
 
 
 def get_github_token() -> str | None:
@@ -61,9 +61,7 @@ def get_github_token() -> str | None:
             for line in out.splitlines():
                 m = re.match(r'^export GITHUB_TOKEN="(.+)"$', line)
                 if m:
-                    console.print(
-                        "[green]✓[/green] GITHUB_TOKEN loaded from tokens.age"
-                    )
+                    get_console().print("[green]✓[/green] GITHUB_TOKEN loaded from tokens.age")
                     return m.group(1)
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
@@ -84,7 +82,7 @@ def get_github_token() -> str | None:
             stderr=subprocess.DEVNULL,
         ).strip()
         if token:
-            console.print("[green]✓[/green] GITHUB_TOKEN loaded from macOS Keychain")
+            get_console().print("[green]✓[/green] GITHUB_TOKEN loaded from macOS Keychain")
             return token
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -115,9 +113,7 @@ def get_github_token() -> str | None:
                 )
                 for field in json.loads(detail).get("fields", []):
                     if field.get("label") == "credential" and field.get("value"):
-                        console.print(
-                            "[green]✓[/green] GITHUB_TOKEN loaded from 1Password"
-                        )
+                        get_console().print("[green]✓[/green] GITHUB_TOKEN loaded from 1Password")
                         return field["value"]
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
@@ -129,7 +125,7 @@ def enable_github_pages(org: str, repo: str) -> bool:
     """Enable GitHub Pages (main branch, /docs folder) via API."""
     token = get_github_token()
     if not token:
-        console.print("[yellow]⚠ GITHUB_TOKEN not set — enable Pages manually[/yellow]")
+        get_console().print("[yellow]⚠ GITHUB_TOKEN not set — enable Pages manually[/yellow]")
         return False
 
     url = f"https://api.github.com/repos/{org}/{repo}/pages"
@@ -142,11 +138,11 @@ def enable_github_pages(org: str, repo: str) -> bool:
     req = urllib.request.Request(url, headers=headers)
     try:
         urllib.request.urlopen(req)
-        console.print("[green]✓[/green] GitHub Pages already enabled")
+        get_console().print("[green]✓[/green] GitHub Pages already enabled")
         return True
     except urllib.error.HTTPError as e:
         if e.code != 404:
-            console.print(f"[yellow]⚠ GitHub Pages check failed: {e.code}[/yellow]")
+            get_console().print(f"[yellow]⚠ GitHub Pages check failed: {e.code}[/yellow]")
             return False
 
     # Enable it
@@ -155,10 +151,10 @@ def enable_github_pages(org: str, repo: str) -> bool:
     req.add_header("Content-Type", "application/json")
     try:
         urllib.request.urlopen(req)
-        console.print("[green]✓[/green] GitHub Pages enabled (main → /docs)")
+        get_console().print("[green]✓[/green] GitHub Pages enabled (main → /docs)")
         return True
     except urllib.error.HTTPError as e:
-        console.print(f"[yellow]⚠ Failed to enable Pages: {e.code}[/yellow]")
+        get_console().print(f"[yellow]⚠ Failed to enable Pages: {e.code}[/yellow]")
         return False
 
 
@@ -168,14 +164,12 @@ def setup_pages(repo_root: Path, org: str, repo: str) -> str:
     artefacts_dir.mkdir(parents=True, exist_ok=True)
 
     # Write player page
-    html = (
-        importlib.resources.files("repo_artefacts")
-        .joinpath("template.html")
-        .read_text()
+    html_content = (
+        importlib.resources.files("repo_artefacts").joinpath("template.html").read_text()
     )
-    html = html.replace("{REPO_NAME}", repo)
-    (artefacts_dir / "index.html").write_text(html)
-    console.print("[green]✓[/green] Created docs/artefacts/index.html")
+    html_content = html_content.replace("{REPO_NAME}", html_mod.escape(repo, quote=True))
+    (artefacts_dir / "index.html").write_text(html_content)
+    get_console().print("[green]✓[/green] Created docs/artefacts/index.html")
 
     # Update README
     base_url = f"https://{org.lower()}.github.io/{repo}/artefacts/"
@@ -190,10 +184,10 @@ def setup_pages(repo_root: Path, org: str, repo: str) -> str:
                 text,
                 flags=re.DOTALL,
             )
-            console.print("[green]✓[/green] Updated artefacts block in README.md")
+            get_console().print("[green]✓[/green] Updated artefacts block in README.md")
         else:
             text = text.rstrip() + "\n\n" + block + "\n"
-            console.print("[green]✓[/green] Appended artefacts block to README.md")
+            get_console().print("[green]✓[/green] Appended artefacts block to README.md")
         readme.write_text(text)
 
     enable_github_pages(org, repo)
