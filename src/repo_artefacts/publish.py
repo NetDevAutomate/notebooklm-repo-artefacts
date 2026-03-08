@@ -32,9 +32,17 @@ def check_artefacts(artefacts_dir: Path) -> dict[str, Path]:
     return found
 
 
-def verify_pages(url: str, max_wait: int = 120) -> bool:
-    """Poll the GitHub Pages URL until it returns 200 or timeout."""
+def verify_pages(
+    url: str,
+    max_wait: int = 120,
+    artefact_urls: dict[str, str] | None = None,
+) -> tuple[bool, set[str]]:
+    """Poll the GitHub Pages URL until it returns 200 or timeout.
+
+    Returns (site_ok, verified_artefact_types).
+    """
     get_console().print(f"\n[bold]Verifying[/bold] {url}")
+    verified: set[str] = set()
     start = time.time()
     while time.time() - start < max_wait:
         try:
@@ -42,14 +50,26 @@ def verify_pages(url: str, max_wait: int = 120) -> bool:
             resp = urllib.request.urlopen(req)
             if resp.status == 200:
                 get_console().print("[green]✓[/green] Pages site is live!")
-                return True
+                if artefact_urls:
+                    for kind, artefact_url in artefact_urls.items():
+                        try:
+                            areq = urllib.request.Request(artefact_url, method="HEAD")
+                            aresp = urllib.request.urlopen(areq)
+                            if aresp.status == 200:
+                                get_console().print(f"  [green]✓[/green] {kind}: {artefact_url}")
+                                verified.add(kind)
+                            else:
+                                get_console().print(f"  [red]✗[/red] {kind}: HTTP {aresp.status}")
+                        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+                            get_console().print(f"  [red]✗[/red] {kind}: {e}")
+                return True, verified
         except (urllib.error.HTTPError, urllib.error.URLError):
             pass
         get_console().print("  Waiting for deployment...", style="dim")
         time.sleep(10)
 
     get_console().print("[red]✗[/red] Pages site not responding after timeout")
-    return False
+    return False, verified
 
 
 # Paths this tool is allowed to stage

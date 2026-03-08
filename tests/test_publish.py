@@ -67,7 +67,8 @@ def test_verify_pages_success() -> None:
     mock_resp = MagicMock()
     mock_resp.status = 200
     with patch("urllib.request.urlopen", return_value=mock_resp):
-        assert verify_pages("https://example.github.io/repo/artefacts/", max_wait=5)
+        site_ok, _ = verify_pages("https://example.github.io/repo/artefacts/", max_wait=5)
+        assert site_ok
 
 
 def test_verify_pages_timeout() -> None:
@@ -78,7 +79,8 @@ def test_verify_pages_timeout() -> None:
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("not found"),
     ):
-        assert not verify_pages("https://bad.url/", max_wait=1)
+        site_ok, _ = verify_pages("https://bad.url/", max_wait=1)
+        assert not site_ok
 
 
 # --- git_commit_and_push ---

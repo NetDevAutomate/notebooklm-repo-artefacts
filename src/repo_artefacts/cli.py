@@ -354,6 +354,7 @@ def pipeline(
     """
     from repo_artefacts.collector import collect_repo_content, render_to_pdf
     from repo_artefacts.notebooklm import (
+        GenerateResult,
         delete_notebook,
         download_artefacts,
         generate_artefacts,
@@ -432,11 +433,17 @@ def pipeline(
             )
         target = [a for a in target if a not in already_done]
 
+    expected = set(target)
+    gen_result: GenerateResult | None = None
     if target:
         get_console().print(f"  Generating: [bold]{', '.join(target)}[/bold]")
-        asyncio.run(generate_artefacts(nb_id, target, timeout=timeout))
+        gen_result = asyncio.run(generate_artefacts(nb_id, target, timeout=timeout))
     else:
         get_console().print("  [green]All requested artefacts already generated[/green]")
+
+    # Quota-exhausted artefacts can't succeed — don't require them for cleanup
+    if gen_result and gen_result.quota_exhausted:
+        expected -= gen_result.quota_exhausted
 
     # Step 3: Download
     get_console().rule("Step 3: Download artefacts")
@@ -463,14 +470,38 @@ def pipeline(
 
     # Step 7: Verify
     get_console().rule("Step 7: Verify deployment")
-    verify_pages(url, max_wait=120)
+    artefact_urls = {kind: url + path.name for kind, path in found.items()}
+    site_ok, verified = verify_pages(url, max_wait=120, artefact_urls=artefact_urls)
 
-    # Step 8: Cleanup
-    if not keep_notebook:
+    # Step 8: Cleanup — only delete if all expected artefacts succeeded
+    all_expected_downloaded = expected <= set(found)
+    all_expected_verified = expected <= verified if site_ok else False
+    gen_ok = gen_result is None or not gen_result.failed
+    safe_to_delete = gen_ok and all_expected_downloaded and all_expected_verified
+
+    if keep_notebook:
+        get_console().print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
+    elif safe_to_delete:
         get_console().rule("Step 8: Cleanup notebook")
         get_console().print(f"  Deleting notebook {nb_id} (artefacts are now in the repo)")
         asyncio.run(delete_notebook(nb_id))
     else:
-        get_console().print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
+        get_console().rule("Step 8: Notebook preserved")
+        reasons: list[str] = []
+        if not gen_ok:
+            assert gen_result is not None
+            reasons.append(f"generation failed: {', '.join(sorted(gen_result.failed))}")
+        if not all_expected_downloaded:
+            missing = expected - set(found)
+            reasons.append(f"not downloaded: {', '.join(sorted(missing))}")
+        if site_ok and not all_expected_verified:
+            missing = expected - verified
+            reasons.append(f"not verified on Pages: {', '.join(sorted(missing))}")
+        get_console().print(
+            f"  [yellow]⚠[/yellow] Keeping notebook {nb_id} — {'; '.join(reasons)}"
+        )
+        get_console().print(
+            f"  Resume later: [bold]repo-artefacts pipeline . -n {nb_id} --resume[/bold]"
+        )
 
     get_console().print(f"\n[bold green]✅ Pipeline complete![/bold green] {url}")

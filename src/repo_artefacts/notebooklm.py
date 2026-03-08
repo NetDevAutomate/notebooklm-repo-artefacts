@@ -135,6 +135,16 @@ _GENERATE_KWARGS: dict[str, dict[str, object]] = {
     "video": {"video_style": VideoStyle.WHITEBOARD},
 }
 
+
+@dataclass
+class GenerateResult:
+    """Outcome of a generate_artefacts() call."""
+
+    completed: set[str]
+    failed: set[str]
+    quota_exhausted: set[str]
+
+
 DOWNLOAD_MAP: list[DownloadSpec] = [
     DownloadSpec("audio", "list_audio", "download_audio", "audio_overview.mp3"),
     DownloadSpec("video", "list_video", "download_video", "video_overview.mp4"),
@@ -353,7 +363,9 @@ async def _poll_by_type(
     return "in_progress"
 
 
-async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: int = 900) -> None:
+async def generate_artefacts(
+    notebook_id: str, artefacts: list[str], timeout: int = 900
+) -> GenerateResult:
     """Generate requested artefact types with retry on failure.
 
     Handles three failure modes:
@@ -370,6 +382,8 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
         pending: set[str] = set()
         retries: dict[str, int] = {a: 0 for a in artefacts}
         quota_exhausted: set[str] = set()
+        completed: set[str] = set()
+        permanently_failed: set[str] = set()
 
         for artefact in artefacts:
             get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
@@ -453,6 +467,7 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
                                 f"[red]✗[/red] {label} failed after"
                                 f" {MAX_RETRIES} retries: {status.error}"
                             )
+                            permanently_failed.add(label)
                             needs_retry.remove(label)
                         # else stays in needs_retry for next loop
                     else:
@@ -464,6 +479,7 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
                         get_console().print(
                             f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries: {e}"
                         )
+                        permanently_failed.add(label)
                         needs_retry.remove(label)
 
             if not pending and not needs_retry:
@@ -487,6 +503,7 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
 
                 if status_str == "completed":
                     get_console().print(f"[green]✓[/green] {label.capitalize()} ready")
+                    completed.add(label)
                     pending.discard(label)
                 elif status_str == "failed":
                     pending.discard(label)
@@ -502,11 +519,14 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
                         get_console().print(
                             f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries"
                         )
+                        permanently_failed.add(label)
                 else:
                     get_console().print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
 
+        timed_out: set[str] = set()
         for label in list(pending) + needs_retry:
             get_console().print(f"[red]✗[/red] {label.capitalize()} timed out")
+            timed_out.add(label)
 
         if quota_exhausted:
             get_console().print(
@@ -520,6 +540,11 @@ async def generate_artefacts(notebook_id: str, artefacts: list[str], timeout: in
             )
 
     get_console().print("[bold green]Done.[/bold green]")
+    return GenerateResult(
+        completed=completed,
+        failed=permanently_failed | timed_out,
+        quota_exhausted=quota_exhausted,
+    )
 
 
 # ---------------------------------------------------------------------------
