@@ -134,8 +134,19 @@ def get_github_token() -> str | None:
     return None
 
 
+def _has_gh_pages_branch(org: str, repo: str, headers: dict[str, str]) -> bool:
+    """Check if the repo has a gh-pages branch."""
+    url = f"https://api.github.com/repos/{org}/{repo}/branches/gh-pages"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        urllib.request.urlopen(req)
+        return True
+    except urllib.error.HTTPError:
+        return False
+
+
 def enable_github_pages(org: str, repo: str) -> bool:
-    """Enable GitHub Pages (main branch, /docs folder) via API."""
+    """Enable GitHub Pages via API, preserving existing config."""
     token = get_github_token()
     if not token:
         get_console().print("[yellow]⚠ GITHUB_TOKEN not set — enable Pages manually[/yellow]")
@@ -147,24 +158,37 @@ def enable_github_pages(org: str, repo: str) -> bool:
         "Accept": "application/vnd.github+json",
     }
 
-    # Check if already enabled
+    # Check if already enabled — if so, leave config untouched
     req = urllib.request.Request(url, headers=headers)
     try:
-        urllib.request.urlopen(req)
-        get_console().print("[green]✓[/green] GitHub Pages already enabled")
+        with urllib.request.urlopen(req) as resp:
+            config = json.loads(resp.read())
+            source = config.get("source", {})
+            branch = source.get("branch", "?")
+            path = source.get("path", "?")
+            get_console().print(
+                f"[green]✓[/green] GitHub Pages already enabled ({branch} → {path})"
+            )
         return True
     except urllib.error.HTTPError as e:
         if e.code != 404:
             get_console().print(f"[yellow]⚠ GitHub Pages check failed: {e.code}[/yellow]")
             return False
 
-    # Enable it
-    data = json.dumps({"source": {"branch": "main", "path": "/docs"}}).encode()
+    # Not yet enabled — prefer gh-pages branch if it exists
+    if _has_gh_pages_branch(org, repo, headers):
+        source_cfg = {"branch": "gh-pages", "path": "/"}
+        label = "gh-pages → /"
+    else:
+        source_cfg = {"branch": "main", "path": "/docs"}
+        label = "main → /docs"
+
+    data = json.dumps({"source": source_cfg}).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     req.add_header("Content-Type", "application/json")
     try:
         urllib.request.urlopen(req)
-        get_console().print("[green]✓[/green] GitHub Pages enabled (main → /docs)")
+        get_console().print(f"[green]✓[/green] GitHub Pages enabled ({label})")
         return True
     except urllib.error.HTTPError as e:
         get_console().print(f"[yellow]⚠ Failed to enable Pages: {e.code}[/yellow]")
