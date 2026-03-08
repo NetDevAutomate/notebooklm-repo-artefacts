@@ -67,3 +67,6 @@ CLAUDE.md
 .copilot/
 .speckit/
 .openspec/
+
+# Plans (local only)
+docs/plans/
