@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_artefacts.pages import README_BLOCK, setup_pages
+from repo_artefacts.pages import _ARTEFACT_ROWS, _build_readme_block, setup_pages
 from repo_artefacts.publish import check_artefacts
 
 # Make scripts/ importable for check_links
@@ -79,7 +79,7 @@ def test_collector_to_readme_flow(tmp_path: Path) -> None:
 def test_link_checker_validates_block() -> None:
     """check_artefacts_block catches invalid anchors."""
     # Valid block
-    valid = README_BLOCK.format(base_url="https://org.github.io/repo/artefacts/")
+    valid = _build_readme_block("https://org.github.io/repo/artefacts/", set(_ARTEFACT_ROWS))
     errors = check_artefacts_block(Path("test.md"), valid)
     assert errors == []
 

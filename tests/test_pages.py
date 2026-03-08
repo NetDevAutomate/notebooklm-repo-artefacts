@@ -7,7 +7,15 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from repo_artefacts.pages import README_BLOCK, get_github_info, get_github_token, setup_pages
+from repo_artefacts.pages import (
+    _ARTEFACT_ROWS,
+    _build_readme_block,
+    get_github_info,
+    get_github_token,
+    setup_pages,
+)
+
+_ALL_TYPES = set(_ARTEFACT_ROWS)
 
 # --- get_github_info ---
 
@@ -37,6 +45,9 @@ def test_setup_pages_creates_files(tmp_path: Path) -> None:
     """setup_pages creates index.html and updates README."""
     readme = tmp_path / "README.md"
     readme.write_text("# Test\n\nSome content.\n")
+    artefacts = tmp_path / "docs" / "artefacts"
+    artefacts.mkdir(parents=True)
+    (artefacts / "audio_overview.mp3").write_bytes(b"x")
 
     with patch("repo_artefacts.pages.enable_github_pages", return_value=True):
         url = setup_pages(tmp_path, "TestOrg", "test-repo")
@@ -55,6 +66,9 @@ def test_setup_pages_updates_existing_block(tmp_path: Path) -> None:
     """setup_pages replaces existing ARTEFACTS block."""
     readme = tmp_path / "README.md"
     readme.write_text("# Test\n\n<!-- ARTEFACTS:START -->\nold\n<!-- ARTEFACTS:END -->\n")
+    artefacts = tmp_path / "docs" / "artefacts"
+    artefacts.mkdir(parents=True)
+    (artefacts / "audio_overview.mp3").write_bytes(b"x")
 
     with patch("repo_artefacts.pages.enable_github_pages", return_value=True):
         setup_pages(tmp_path, "Org", "repo")
@@ -69,14 +83,14 @@ def test_setup_pages_updates_existing_block(tmp_path: Path) -> None:
 
 def test_readme_block_has_correct_heading() -> None:
     """README_BLOCK uses 'Generated Artefacts' heading."""
-    block = README_BLOCK.format(base_url="https://example.github.io/repo/artefacts/")
+    block = _build_readme_block("https://example.github.io/repo/artefacts/", _ALL_TYPES)
     assert "## Generated Artefacts" in block
     assert "Repo Deep Dive" not in block
 
 
 def test_readme_block_has_markers() -> None:
     """README_BLOCK is wrapped in ARTEFACTS markers."""
-    block = README_BLOCK.format(base_url="https://x.github.io/r/artefacts/")
+    block = _build_readme_block("https://x.github.io/r/artefacts/", _ALL_TYPES)
     assert block.startswith("<!-- ARTEFACTS:START -->")
     assert block.endswith("<!-- ARTEFACTS:END -->")
 
@@ -84,7 +98,7 @@ def test_readme_block_has_markers() -> None:
 def test_readme_block_has_four_artefact_links() -> None:
     """README_BLOCK contains links for all four artefact types."""
     base = "https://example.github.io/repo/artefacts/"
-    block = README_BLOCK.format(base_url=base)
+    block = _build_readme_block(base, _ALL_TYPES)
     assert f"[Listen to the Audio Overview]({base})" in block
     assert f"[Watch the Video Overview]({base}#video)" in block
     assert f"[View the Infographic]({base}#infographic)" in block
@@ -93,7 +107,7 @@ def test_readme_block_has_four_artefact_links() -> None:
 
 def test_readme_block_anchors_match_player() -> None:
     """Anchors in README_BLOCK match the index.html section IDs."""
-    block = README_BLOCK.format(base_url="https://x.github.io/r/artefacts/")
+    block = _build_readme_block("https://x.github.io/r/artefacts/", _ALL_TYPES)
     urls = re.findall(r"\(https://[^)]+\)", block)
     valid_anchors = {"", "#video", "#infographic", "#slides"}
     for url in urls:
@@ -107,7 +121,7 @@ def test_readme_block_anchors_match_player() -> None:
 
 def test_readme_block_table_format() -> None:
     """README_BLOCK uses a proper markdown table."""
-    block = README_BLOCK.format(base_url="https://x.github.io/r/artefacts/")
+    block = _build_readme_block("https://x.github.io/r/artefacts/", _ALL_TYPES)
     lines = block.splitlines()
     table_lines = [line for line in lines if line.startswith("|")]
     # Header row + separator + 4 data rows = 6
