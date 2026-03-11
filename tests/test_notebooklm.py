@@ -15,7 +15,7 @@ from repo_artefacts.notebooklm import (
     ArtefactStatus,
     ArtefactType,
     RawArtefact,
-    _delete_failed_by_type,
+    _delete_existing_by_type,
     _parse_raw_artefacts,
     _poll_by_type,
     _request_artefact,
@@ -169,10 +169,10 @@ async def test_poll_by_type_known_completed_still_reported() -> None:
     assert status == "completed"
 
 
-# --- Delete failed ---
+# --- Delete existing by type ---
 
 
-async def test_delete_failed_by_type() -> None:
+async def test_delete_existing_deletes_failed() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(
         return_value=[
@@ -181,15 +181,31 @@ async def test_delete_failed_by_type() -> None:
         ]
     )
     client.artifacts.delete = AsyncMock()
-    await _delete_failed_by_type(client, "nb-1", "infographic")
+    # Default: delete ALL existing (including completed)
+    await _delete_existing_by_type(client, "nb-1", "infographic")
+    assert client.artifacts.delete.call_count == 2
+
+
+async def test_delete_existing_failed_only() -> None:
+    client = MagicMock()
+    client.artifacts._list_raw = AsyncMock(
+        return_value=[
+            ["good-id", None, 7, None, 3],  # completed
+            ["bad-id", None, 7, None, 4],  # failed
+        ]
+    )
+    client.artifacts.delete = AsyncMock()
+    # failed_only=True: only delete failed, leave completed
+    await _delete_existing_by_type(client, "nb-1", "infographic", failed_only=True)
     client.artifacts.delete.assert_called_once_with("nb-1", "bad-id")
 
 
-async def test_delete_failed_skips_non_failed() -> None:
+async def test_delete_existing_skips_other_types() -> None:
     client = MagicMock()
     client.artifacts._list_raw = AsyncMock(return_value=[["ok-id", None, 1, None, 3]])
     client.artifacts.delete = AsyncMock()
-    await _delete_failed_by_type(client, "nb-1", "audio")
+    # Audio (type 1) shouldn't be deleted when targeting infographic
+    await _delete_existing_by_type(client, "nb-1", "infographic")
     client.artifacts.delete.assert_not_called()
 
 

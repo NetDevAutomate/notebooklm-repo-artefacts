@@ -293,10 +293,20 @@ async def _request_artefact(
     return await _with_reauth(client, _do, artefact)
 
 
-async def _delete_failed_by_type(
-    client: NotebookLMClient, notebook_id: str, artefact: str
+async def _delete_existing_by_type(
+    client: NotebookLMClient,
+    notebook_id: str,
+    artefact: str,
+    *,
+    failed_only: bool = False,
 ) -> None:
-    """Delete any failed artefacts of the given type (required before retry)."""
+    """Delete artefacts of the given type before (re)generation.
+
+    Args:
+        failed_only: If True, only delete FAILED artefacts (used during retry).
+            If False, delete ALL artefacts of this type including completed
+            (used when explicitly requesting regeneration).
+    """
     artefact_type = NAME_TO_TYPE[artefact]
     raw = await _with_reauth(
         client, lambda: client.artifacts._list_raw(notebook_id), f"list {artefact}"
@@ -310,14 +320,19 @@ async def _delete_failed_by_type(
             f" (first entry has {len(raw[0]) if raw[0] else 0} elements)[/dim]"
         )
     for art in parsed:
-        if art.type_code == artefact_type and art.is_failed:
-            get_console().print(f"  [dim]Deleting failed {artefact} ({art.id[:12]}...)[/dim]")
+        if art.type_code != artefact_type:
+            continue
+        should_delete = art.is_failed or not failed_only
+        if should_delete:
+            get_console().print(
+                f"  [dim]Deleting {art.status.name.lower()} {artefact} ({art.id[:12]}...)[/dim]"
+            )
             await _with_reauth(
                 client,
                 lambda aid=art.id: client.artifacts.delete(notebook_id, aid),
                 f"delete {artefact}",
             )
-        elif art.type_code == artefact_type:
+        else:
             get_console().print(
                 f"  [dim]{artefact}: found existing with status"
                 f" {art.status.name} ({art.id[:12]}...)[/dim]"
@@ -401,7 +416,7 @@ async def generate_artefacts(
         for artefact in artefacts:
             get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
             try:
-                await _delete_failed_by_type(client, notebook_id, artefact)
+                await _delete_existing_by_type(client, notebook_id, artefact)
                 status = await _request_artefact(client, notebook_id, artefact)
                 if status.is_failed or not status.task_id:
                     err = status.error or "no artifact_id returned"
@@ -477,7 +492,7 @@ async def generate_artefacts(
                 await client.refresh_auth()
                 get_console().print("[green]✓[/green] Auth refreshed")
                 try:
-                    await _delete_failed_by_type(client, notebook_id, label)
+                    await _delete_existing_by_type(client, notebook_id, label, failed_only=True)
                     status = await _request_artefact(client, notebook_id, label)
                     if status.is_failed or not status.task_id:
                         retries[label] += 1
