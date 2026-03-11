@@ -741,3 +741,261 @@ def migrate(
         "[dim]This rewrites history and requires a force push."
         " All collaborators will need to re-clone.[/dim]"
     )
+
+
+@app.command()
+@_handle_errors
+def validate(
+    repo_path: Path = typer.Argument(Path("."), help="Repo to validate README artefact links."),
+    all_repos: bool = typer.Option(
+        False, "--all", "-a", help="Validate all repos in the artefact store."
+    ),
+    store: str | None = typer.Option(
+        None, "--store", "-s", help="Store repo slug (for --all mode)."
+    ),
+) -> None:
+    """Check that artefact URLs in README are reachable.
+
+    For a single repo: parse README, HEAD each artefact URL.
+    With --all: check every repo listed in the store's manifest.
+    """
+    import json
+    import re
+    import urllib.error
+    import urllib.request
+
+    from rich.table import Table
+
+    if all_repos:
+        from repo_artefacts.config import load_config
+        from repo_artefacts.pages import get_github_token
+        from repo_artefacts.store import clone_or_pull_store
+
+        store_slug = store or load_config().default_store
+        if not store_slug:
+            get_console().print(
+                "[red]No store configured. Use --store or set default_store.[/red]"
+            )
+            raise typer.Exit(1)
+
+        token = get_github_token()
+        store_path = clone_or_pull_store(store_slug, token)
+        manifest_path = store_path / "manifest.json"
+        if not manifest_path.exists():
+            get_console().print("[red]No manifest.json in store.[/red]")
+            raise typer.Exit(1)
+
+        manifest = json.loads(manifest_path.read_text())
+        repos = manifest.get("repos", [])
+        if not repos:
+            get_console().print("[yellow]No repos in manifest.[/yellow]")
+            return
+
+        # Read CNAME for base URL
+        cname_file = store_path / "CNAME"
+        if cname_file.exists():
+            domain = cname_file.read_text().strip()
+            base = f"https://{domain}"
+        else:
+            base = (
+                f"https://{store_slug.split('/')[0].lower()}.github.io/{store_slug.split('/')[1]}"
+            )
+
+        table = Table(title="Artefact Link Validation")
+        table.add_column("Repo", style="bold")
+        table.add_column("Artefact")
+        table.add_column("Status")
+        table.add_column("URL", style="dim")
+
+        broken = 0
+        for repo_entry in repos:
+            name = repo_entry["name"]
+            for artefact_type in repo_entry.get("artefacts", []):
+                from repo_artefacts.publish import STANDARD_FILES
+
+                # Find the filename for this artefact type
+                filename = next(
+                    (fn for fn, kind in STANDARD_FILES.items() if kind == artefact_type), None
+                )
+                if not filename:
+                    continue
+                url = f"{base}/{name}/artefacts/{filename}"
+                try:
+                    req = urllib.request.Request(url, method="HEAD")
+                    resp = urllib.request.urlopen(req, timeout=10)
+                    if resp.status == 200:
+                        table.add_row(name, artefact_type, "[green]OK[/green]", url)
+                    else:
+                        table.add_row(name, artefact_type, f"[red]HTTP {resp.status}[/red]", url)
+                        broken += 1
+                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+                    table.add_row(name, artefact_type, f"[red]{e}[/red]", url)
+                    broken += 1
+
+        get_console().print(table)
+        if broken:
+            get_console().print(f"\n[red]{broken} broken link(s) found.[/red]")
+            raise typer.Exit(1)
+        get_console().print("\n[green]All links OK.[/green]")
+        return
+
+    # Single repo mode: parse README for artefact URLs
+    root = repo_path.resolve()
+    readme = root / "README.md"
+    if not readme.exists():
+        get_console().print("[red]No README.md found.[/red]")
+        raise typer.Exit(1)
+
+    text = readme.read_text()
+    m = re.search(
+        r"<!-- ARTEFACTS:START -->(.+?)<!-- ARTEFACTS:END -->",
+        text,
+        flags=re.DOTALL,
+    )
+    if not m:
+        get_console().print("[yellow]No artefacts block found in README.md[/yellow]")
+        return
+
+    urls = re.findall(r"\((https?://[^)]+)\)", m.group(1))
+    if not urls:
+        get_console().print("[yellow]No URLs found in artefacts block.[/yellow]")
+        return
+
+    table = Table(title="Artefact Link Validation")
+    table.add_column("URL", style="dim")
+    table.add_column("Status")
+
+    broken = 0
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            resp = urllib.request.urlopen(req, timeout=10)
+            if resp.status == 200:
+                table.add_row(url, "[green]OK[/green]")
+            else:
+                table.add_row(url, f"[red]HTTP {resp.status}[/red]")
+                broken += 1
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            table.add_row(url, f"[red]{e}[/red]")
+            broken += 1
+
+    get_console().print(table)
+    if broken:
+        get_console().print(f"\n[red]{broken} broken link(s) found.[/red]")
+        raise typer.Exit(1)
+    get_console().print("\n[green]All links OK.[/green]")
+
+
+@app.command()
+@_handle_errors
+def clean(
+    store: str | None = typer.Option(
+        None, "--store", "-s", help="Artefact store repo (org/repo)."
+    ),
+    delete: bool = typer.Option(
+        False, "--delete", help="Remove orphaned artefact directories and push."
+    ),
+) -> None:
+    """Find orphaned artefacts in the store.
+
+    Lists artefact directories that no longer have a matching source repo
+    on GitHub. With --delete, removes them and pushes.
+    """
+    import urllib.error
+    import urllib.request
+
+    from rich.table import Table
+
+    from repo_artefacts.config import load_config
+    from repo_artefacts.pages import get_github_token
+    from repo_artefacts.store import (
+        clone_or_pull_store,
+        list_store_repos,
+        remove_store_repo,
+    )
+
+    store_slug = store or load_config().default_store
+    if not store_slug:
+        get_console().print("[red]No store configured. Use --store or set default_store.[/red]")
+        raise typer.Exit(1)
+
+    org = store_slug.split("/")[0]
+    token = get_github_token()
+    store_path = clone_or_pull_store(store_slug, token)
+    repos = list_store_repos(store_path)
+
+    if not repos:
+        get_console().print("[dim]No repo directories in store.[/dim]")
+        return
+
+    get_console().print(f"Checking {len(repos)} repos in {store_slug}...\n")
+
+    table = Table(title="Store Repos")
+    table.add_column("Repo", style="bold")
+    table.add_column("Source Repo")
+    table.add_column("Status")
+
+    orphans: list[str] = []
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    for repo_name in repos:
+        api_url = f"https://api.github.com/repos/{org}/{repo_name}"
+        try:
+            req = urllib.request.Request(api_url, headers=headers)
+            urllib.request.urlopen(req, timeout=10)
+            table.add_row(repo_name, f"{org}/{repo_name}", "[green]exists[/green]")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                table.add_row(repo_name, f"{org}/{repo_name}", "[red]not found[/red]")
+                orphans.append(repo_name)
+            else:
+                table.add_row(repo_name, f"{org}/{repo_name}", f"[yellow]HTTP {e.code}[/yellow]")
+        except (urllib.error.URLError, TimeoutError) as e:
+            table.add_row(repo_name, f"{org}/{repo_name}", f"[yellow]{e}[/yellow]")
+
+    get_console().print(table)
+
+    if not orphans:
+        get_console().print("\n[green]No orphaned artefacts found.[/green]")
+        return
+
+    get_console().print(f"\n[yellow]{len(orphans)} orphan(s) found: {', '.join(orphans)}[/yellow]")
+
+    if not delete:
+        get_console().print("[dim]Use --delete to remove orphaned directories.[/dim]")
+        return
+
+    # Remove orphans and push
+    for repo_name in orphans:
+        remove_store_repo(store_path, repo_name)
+        get_console().print(f"  [green]✓[/green] Removed {repo_name}")
+
+    # Commit removals — stage manifest + removed dirs
+    import subprocess
+
+    for repo_name in orphans:
+        subprocess.run(
+            ["git", "rm", "-r", "--quiet", "--ignore-unmatch", "--", repo_name],
+            cwd=store_path,
+            capture_output=True,
+        )
+    subprocess.run(["git", "add", "--", "manifest.json"], cwd=store_path, capture_output=True)
+
+    result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=store_path)
+    if result.returncode == 0:
+        get_console().print("  No changes to commit")
+        return
+
+    try:
+        subprocess.run(
+            ["git", "commit", "-m", f"clean: remove orphaned artefacts ({', '.join(orphans)})"],
+            cwd=store_path,
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "push"], cwd=store_path, check=True, capture_output=True)
+        get_console().print("  [green]✓[/green] Pushed cleanup to store")
+    except subprocess.CalledProcessError as e:
+        get_console().print(f"  [red]✗[/red] Push failed: {e}")
