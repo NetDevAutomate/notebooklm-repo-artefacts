@@ -406,8 +406,9 @@ async def generate_artefacts(
                 if status.is_failed or not status.task_id:
                     err = status.error or "no artifact_id returned"
                     err_detail = (
-                        f"error={status.error!r}, task_id={status.task_id!r},"
-                        f" is_failed={status.is_failed}"
+                        f"error={status.error!r}, error_code={status.error_code!r},"
+                        f" task_id={status.task_id!r}, status={status.status!r},"
+                        f" metadata={status.metadata!r}"
                     )
                     if _is_quota_error(err):
                         # Refresh auth and try once more to distinguish
