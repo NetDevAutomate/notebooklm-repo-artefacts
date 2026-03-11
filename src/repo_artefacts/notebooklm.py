@@ -77,11 +77,11 @@ class RawArtefact:
 
     @property
     def is_completed(self) -> bool:
-        return self.status is ArtefactStatus.COMPLETED
+        return self.status == ArtefactStatus.COMPLETED
 
     @property
     def is_failed(self) -> bool:
-        return self.status is ArtefactStatus.FAILED
+        return self.status == ArtefactStatus.FAILED
 
     @property
     def type_name(self) -> str:
@@ -301,13 +301,26 @@ async def _delete_failed_by_type(
     raw = await _with_reauth(
         client, lambda: client.artifacts._list_raw(notebook_id), f"list {artefact}"
     )
-    for art in _parse_raw_artefacts(raw):
-        if art.type_code is artefact_type and art.is_failed:
+    parsed = _parse_raw_artefacts(raw)
+
+    # Log what we see for debugging when entries are skipped
+    if not parsed and raw:
+        get_console().print(
+            f"  [dim]⚠ {artefact}: {len(raw)} raw entries but none parseable"
+            f" (first entry has {len(raw[0]) if raw[0] else 0} elements)[/dim]"
+        )
+    for art in parsed:
+        if art.type_code == artefact_type and art.is_failed:
             get_console().print(f"  [dim]Deleting failed {artefact} ({art.id[:12]}...)[/dim]")
             await _with_reauth(
                 client,
                 lambda aid=art.id: client.artifacts.delete(notebook_id, aid),
                 f"delete {artefact}",
+            )
+        elif art.type_code == artefact_type:
+            get_console().print(
+                f"  [dim]{artefact}: found existing with status"
+                f" {art.status.name} ({art.id[:12]}...)[/dim]"
             )
 
 
@@ -348,7 +361,7 @@ async def _poll_by_type(
         client, lambda: client.artifacts._list_raw(notebook_id), f"poll {artefact}"
     )
     for art in _parse_raw_artefacts(raw):
-        if art.type_code is not artefact_type:
+        if art.type_code != artefact_type:
             continue
         if art.id not in known_ids or art.status in (
             ArtefactStatus.COMPLETED,
@@ -391,7 +404,11 @@ async def generate_artefacts(
                 await _delete_failed_by_type(client, notebook_id, artefact)
                 status = await _request_artefact(client, notebook_id, artefact)
                 if status.is_failed or not status.task_id:
-                    err = status.error or "no task_id"
+                    err = status.error or "no artifact_id returned"
+                    err_detail = (
+                        f"error={status.error!r}, task_id={status.task_id!r},"
+                        f" is_failed={status.is_failed}"
+                    )
                     if _is_quota_error(err):
                         # Refresh auth and try once more to distinguish
                         # quota exhaustion from stale CSRF
@@ -420,6 +437,7 @@ async def generate_artefacts(
                         f" ({err})"
                         f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
                     )
+                    get_console().print(f"  [dim]Detail: {err_detail}[/dim]")
                     await client.refresh_auth()
                 else:
                     pending.add(artefact)
