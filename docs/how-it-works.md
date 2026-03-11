@@ -14,42 +14,57 @@ graph TD
     E --> G[🎬 Video Explainer]
     E --> H[📊 Slide Deck]
     E --> I[🖼️ Infographic]
-    F & G & H & I -->|repo-artefacts download| J[docs/artefacts/]
-    J -->|repo-artefacts pages| K[Create index.html player]
-    K --> L[Update README.md]
-    L --> M[Enable GitHub Pages via API]
-    M --> N[Git commit + push]
-    N --> O[GitHub Pages deploys]
-    O --> P["🌐 org.github.io/repo/artefacts/"]
+    F & G & H & I -->|download| J[Local artefacts]
+    J --> K{--store set?}
+    K -->|Yes| L[Push to artefact-store repo]
+    K -->|No| M[Commit to docs/artefacts/]
+    L --> N[Update source README — links only]
+    M --> O[Update README + enable Pages]
+    N --> P["🌐 artefacts.example.dev/repo/"]
+    O --> Q["🌐 org.github.io/repo/artefacts/"]
 ```
 
 ## Where Do Files Live?
 
-The artefacts are committed directly to the repo. GitHub Pages serves the same files as a website — no separate hosting needed.
+There are two modes — choose based on whether you want to keep binary files out of source repos.
+
+### Local mode (default)
+
+Artefacts are committed directly to the source repo. GitHub Pages serves the same files.
 
 ```mermaid
 graph LR
-    subgraph "Git Repository"
-        direction TB
+    subgraph "Source Repo"
         R[docs/artefacts/]
-        R --> A1[audio_overview.mp3]
-        R --> A2[video_overview.mp4]
-        R --> A3[infographic.png]
-        R --> A4[slides.pdf]
+        R --> A1[audio, video, slides, infographic]
         R --> A5[index.html]
     end
-
     subgraph "GitHub Pages"
-        direction TB
         P["org.github.io/repo/artefacts/"]
-        P --> B1[audio_overview.mp3]
-        P --> B2[video_overview.mp4]
-        P --> B3[infographic.png]
-        P --> B4[slides.pdf]
-        P --> B5["index.html (player)"]
     end
+    R -.->|"Same files"| P
+```
 
-    R -.->|"Same files,<br/>served as website"| P
+### Store mode (`--store`)
+
+Artefacts are published to a separate store repo. Source repo gets links only — zero binary files.
+
+```mermaid
+graph LR
+    subgraph "Source Repo"
+        RM[README.md — links only]
+    end
+    subgraph "Artefact Store"
+        ST[repo-name/artefacts/]
+        ST --> B1[audio, video, slides, infographic]
+        ST --> B5[index.html]
+        ST2[manifest.json]
+    end
+    subgraph "Store Pages"
+        SP["artefacts.example.dev/repo/"]
+    end
+    RM -.->|HTTPS links| SP
+    ST -.->|GitHub Pages| SP
 ```
 
 ## The `publish` Pipeline

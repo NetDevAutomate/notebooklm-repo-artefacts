@@ -29,19 +29,29 @@ graph TD
     E --> E1["🎧 Audio  🎬 Video  📊 Slides  🖼️ Infographic"]
 
     E1 --> F["Step 3: Download artefacts"]
-    F --> F1[Save to docs/artefacts/]
+    F --> F1[Save to local temp dir]
 
     F1 --> G["Step 4: Check artefacts"]
     G --> G1{All files present?}
     G1 -->|No| G2[Exit with error]
-    G1 -->|Yes| H["Step 5: Setup GitHub Pages"]
+    G1 -->|Yes| S{--store set?}
 
+    S -->|Yes| S1["Step 5: Publish to artefact store"]
+    S1 --> S2[Clone store repo shallow]
+    S2 --> S3[Copy artefacts + player page]
+    S3 --> S4[Update manifest.json]
+    S4 --> S5[Push artefact store]
+    S5 --> S6["Step 6: Update source README"]
+    S6 --> S7[Push README only — no binaries]
+
+    S -->|No| H["Step 5: Setup GitHub Pages"]
     H --> H1[Create index.html player]
     H1 --> H2[Update README.md]
     H2 --> H3[Enable Pages via API]
+    H3 --> I["Step 6: Commit & push<br/>docs/artefacts/ + README"]
 
-    H3 --> I["Step 6: Commit & push"]
-    I --> J["Step 7: Verify deployment"]
+    S7 --> J["Step 7: Verify deployment"]
+    I --> J
     J --> J1["Poll Pages URL until 200"]
 
     J1 --> K{keep_notebook?}
@@ -58,6 +68,7 @@ sequenceDiagram
     participant CLI as repo-artefacts pipeline
     participant Col as collector
     participant NLM as NotebookLM API
+    participant Store as Artefact Store
     participant GH as GitHub
 
     User->>CLI: pipeline /path/to/repo
@@ -87,19 +98,21 @@ sequenceDiagram
     end
 
     rect rgb(30, 50, 40)
-    Note over CLI,GH: Publish
-    CLI->>CLI: Create index.html player
-    CLI->>CLI: Update README.md
-    CLI->>GH: Enable GitHub Pages (API)
-    CLI->>GH: git commit + push
+    Note over CLI,Store: Publish (--store mode)
+    CLI->>Store: Clone store (shallow)
+    CLI->>Store: Copy artefacts + player page
+    CLI->>Store: Update manifest.json
+    CLI->>Store: git push
+    CLI->>CLI: Update source README (links only)
+    CLI->>GH: git push (README only)
     end
 
     rect rgb(50, 40, 30)
-    Note over CLI,GH: Verify & Cleanup
+    Note over CLI,Store: Verify & Cleanup
     loop Poll until 200
-        CLI->>GH: HEAD request to Pages URL
+        CLI->>Store: HEAD request to store Pages URL
     end
-    GH-->>CLI: 200 OK
+    Store-->>CLI: 200 OK
     CLI->>NLM: delete_notebook()
     end
 
@@ -121,6 +134,7 @@ sequenceDiagram
 | `-r, --remote` | Git remote to push to | `origin` |
 | `-t, --timeout` | Generation timeout per artefact (seconds) | `900` |
 | `--keep-notebook` | Don't delete the notebook after publishing | `false` |
+| `-s, --store` | Publish to external artefact store (`org/repo`) | config default |
 
 Selection modes (pick one):
 - **Default**: generate all four types, skipping any already completed in the notebook
@@ -145,9 +159,19 @@ Selection modes (pick one):
 
 Use `pipeline` for a fresh repo you haven't touched. Use `publish` when you already have a notebook and want more control over individual steps.
 
+## Artefact Store Mode
+
+With `--store` (or a `default_store` in `~/.config/repo-artefacts/config.toml`), the pipeline publishes artefacts to a separate GitHub repo instead of committing binary files into the source repo:
+
+- **Store repo** gets: artefact files, player page, manifest.json
+- **Source repo** gets: README links only (zero binary files)
+- **Store is served** via GitHub Pages (e.g., `artefacts.netdevautomate.dev`)
+
+This keeps source repos lean. The store repo is cloned shallowly (`--depth 1`) and cached in `~/.cache/repo-artefacts/stores/` for fast subsequent runs.
+
 ## Git Safety
 
-The pipeline respects your repository's pre-commit hooks during the commit step. Only `docs/artefacts/` and `README.md` are staged — other files in your working tree are never touched. If the tool detects a detached HEAD state, it will refuse to push rather than silently targeting a default branch.
+In local mode, only `docs/artefacts/` and `README.md` are staged. In store mode, only `README.md` is staged in the source repo. Other files in your working tree are never touched. Pre-commit hooks are respected in both modes. If the tool detects a detached HEAD state, it will refuse to push.
 
 ## CI Integration
 

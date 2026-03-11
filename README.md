@@ -5,7 +5,7 @@ Generate NotebookLM artefacts — audio walkthroughs, video explainers, slide de
 ## How It Works
 
 ```
-repo → collect files → render to PDF (with Mermaid) → upload to NotebookLM → generate artefacts → download
+repo → collect files → render to PDF (with Mermaid) → upload to NotebookLM → generate artefacts → publish
 ```
 
 1. **Collect** — Scans a git repo and assembles key files (README, docs, config, source code) into a single markdown document
@@ -13,7 +13,7 @@ repo → collect files → render to PDF (with Mermaid) → upload to NotebookLM
 3. **Upload** — Sends the PDF to Google NotebookLM as a notebook source
 4. **Generate** — Creates audio, video, slide deck, and/or infographic artefacts via NotebookLM
 5. **Download** — Fetches the generated artefacts locally
-6. **Update README** — Optionally inserts an artefacts listing into your project's README
+6. **Publish** — Pushes artefacts to a centralised store (or commits to the source repo) and updates README with links
 
 ## Installation
 
@@ -54,8 +54,11 @@ This opens a browser for Google cookie-based auth. Credentials are stored locall
 One command to go from repo to hosted artefacts:
 
 ```bash
-# Full pipeline: collect → upload → generate → download → pages → push → verify → cleanup
+# Full pipeline: collect → upload → generate → download → publish → verify → cleanup
 repo-artefacts pipeline /path/to/repo
+
+# Publish to a centralised artefact store (no binary files in source repo)
+repo-artefacts pipeline /path/to/repo --store NetDevAutomate/artefact-store
 
 # Use an existing notebook (skips upload)
 repo-artefacts pipeline /path/to/repo -n NOTEBOOK_ID
@@ -152,10 +155,26 @@ repo-artefacts download -o ./docs/artefacts
 | `--exclude` | pipeline | Artefact types to skip (repeatable) | — |
 | `--resume` | pipeline | Only generate artefacts not yet completed (note: default mode already skips completed artefacts) | `false` |
 | `--keep-notebook` | pipeline | Don't delete the notebook after publishing | `false` |
+| `-s, --store` | pipeline, publish | Publish to external artefact store (`org/repo`) | config default |
 | `-r, --remote` | publish, pipeline | Git remote to push to | `origin` |
 | `--skip-generate` | publish | Skip artefact generation (use existing files) | `false` |
 | `--skip-verify` | publish | Skip page verification | `false` |
 | `--verify-timeout` | publish | Max seconds to wait for Pages deployment | `120` |
+
+## Artefact Store
+
+By default, artefacts are committed to the source repo in `docs/artefacts/`. For large repos or organisations with many projects, use `--store` to publish artefacts to a centralised store instead — keeping source repos lean.
+
+```bash
+# Set a default store (one-time setup)
+mkdir -p ~/.config/repo-artefacts
+echo 'default_store = "YourOrg/artefact-store"' > ~/.config/repo-artefacts/config.toml
+
+# Pipeline now publishes to the store automatically
+repo-artefacts pipeline /path/to/repo
+```
+
+With `--store`, the source repo gets README links only — zero binary files committed. Artefacts are served via GitHub Pages from the store repo.
 
 ## What Gets Collected
 

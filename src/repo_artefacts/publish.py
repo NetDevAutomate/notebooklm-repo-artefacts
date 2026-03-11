@@ -90,10 +90,10 @@ def _get_current_branch(repo_root: Path) -> str | None:
     return None if branch == "HEAD" else branch
 
 
-def _stage_tool_outputs(repo_root: Path) -> list[str]:
+def _stage_tool_outputs(repo_root: Path, outputs: list[str] | None = None) -> list[str]:
     """Stage only files this tool creates. Returns list of staged paths."""
     staged: list[str] = []
-    for rel_path in TOOL_OUTPUTS:
+    for rel_path in outputs or TOOL_OUTPUTS:
         full_path = repo_root / rel_path
         if not full_path.exists():
             continue
@@ -117,6 +117,7 @@ def git_commit_and_push(
     message: str,
     remote: str = "origin",
     branch: str | None = None,
+    outputs: list[str] | None = None,
 ) -> bool:
     """Stage tool outputs, commit, and push.
 
@@ -125,6 +126,9 @@ def git_commit_and_push(
     - Respects pre-commit hooks (no --no-verify)
     - Auto-detects branch (refuses on detached HEAD)
     - Skips commit if nothing to commit
+
+    Args:
+        outputs: Override TOOL_OUTPUTS with custom paths to stage.
     """
     if branch is None:
         branch = _get_current_branch(repo_root)
@@ -135,7 +139,7 @@ def git_commit_and_push(
             return False
 
     try:
-        staged = _stage_tool_outputs(repo_root)
+        staged = _stage_tool_outputs(repo_root, outputs)
         if not staged:
             get_console().print("  No tool outputs to stage")
             return True

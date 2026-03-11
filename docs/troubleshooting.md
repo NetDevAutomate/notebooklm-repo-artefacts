@@ -111,6 +111,34 @@ notebooklm login
 
 This opens a browser for Google sign-in and stores cookies locally.
 
+## Artefact Store Issues
+
+### "Failed to clone artefact-store"
+
+**Cause:** The store repo doesn't exist, or the GitHub token lacks read access.
+
+**Fix:**
+1. Verify the store repo exists: `gh repo view <org>/<store>`
+2. Check the token has `repo` scope
+3. Create the store repo: `gh repo create <org>/<store> --public`
+
+### "Store push failed"
+
+**Cause:** Concurrent push conflict or insufficient permissions.
+
+**Fix:** Re-run the pipeline. The tool attempts `pull --rebase` + retry automatically. If it persists, check write access to the store repo.
+
+### Artefacts appear in both store and source repo
+
+**Cause:** Pipeline was run without `--store` previously, then with `--store`. Old files remain in `docs/artefacts/`.
+
+**Fix:** Remove old artefacts from the source repo:
+```bash
+git rm -r docs/artefacts/
+git commit -m "chore: remove artefacts (moved to store)"
+git push
+```
+
 ## Common Errors
 
 | Error | Cause | Fix |
@@ -119,3 +147,5 @@ This opens a browser for Google sign-in and stores cookies locally.
 | `Failed to spawn: pyright` | Missing dev dependency | `uv add --dev pyright` |
 | `age: no identity matched` | Wrong age key for tokens.age | Check `~/.config/age/keys.txt` |
 | `op: not signed in` | 1Password CLI session expired | Run `op signin` then retry |
+| `Failed to clone store` | Store repo missing or token lacks access | Check repo exists and token has `repo` scope |
+| `Store push failed` | Concurrent push or permissions | Re-run pipeline (auto-retries) |

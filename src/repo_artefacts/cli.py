@@ -249,14 +249,24 @@ def publish(
     verify_timeout: int = typer.Option(
         120, "--verify-timeout", help="Max seconds to wait for Pages deployment."
     ),
+    store: str | None = typer.Option(
+        None,
+        "--store",
+        "-s",
+        help="Publish to external artefact store (org/repo). Uses config default if set.",
+    ),
 ) -> None:
     """End-to-end: generate artefacts → setup pages → push → verify.
 
     Generates all NotebookLM artefacts, sets up the GitHub Pages player,
     commits and pushes, then verifies the hosted page is live.
+
+    With --store, publishes artefacts to a separate store repo instead of
+    committing binary files into this repo.
     """
+    from repo_artefacts.config import load_config
     from repo_artefacts.notebooklm import download_artefacts, generate_artefacts
-    from repo_artefacts.pages import get_github_info, setup_pages
+    from repo_artefacts.pages import get_github_info, get_github_token, setup_pages
     from repo_artefacts.publish import (
         check_artefacts,
         git_commit_and_push,
@@ -265,9 +275,12 @@ def publish(
 
     root = repo_path.resolve()
     org, repo = get_github_info(root)
+    store_slug = store or load_config().default_store
     output_dir = root / "docs" / "artefacts"
 
     get_console().print(f"\n[bold]Publishing artefacts[/bold] for [cyan]{org}/{repo}[/cyan]\n")
+    if store_slug:
+        get_console().print(f"  Store: [cyan]{store_slug}[/cyan]")
 
     # Step 1: Generate artefacts
     if not skip_generate:
@@ -285,20 +298,45 @@ def publish(
     for kind, path in found.items():
         get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
 
-    # Step 3: Setup pages
-    get_console().rule("Step 3: Setup GitHub Pages")
-    url = setup_pages(root, org, repo)
+    if store_slug:
+        # Store mode: publish to artefact store, update source README only
+        from repo_artefacts.store import (
+            clone_or_pull_store,
+            commit_and_push_store,
+            publish_to_store,
+        )
 
-    # Step 4: Commit and push
-    get_console().rule("Step 4: Commit and push")
-    git_commit_and_push(
-        root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
-    )
+        get_console().rule("Step 3: Publish to artefact store")
+        token = get_github_token()
+        store_path = clone_or_pull_store(store_slug, token)
+        url = publish_to_store(store_path, repo, output_dir)
+        push_ok = commit_and_push_store(store_path, repo)
+        if not push_ok:
+            raise typer.Exit(1)
 
-    # Step 5: Verify
-    if not skip_verify:
-        get_console().rule("Step 5: Verify deployment")
-        verify_pages(url, max_wait=verify_timeout)
+        get_console().rule("Step 4: Update source README")
+        setup_pages(root, org, repo, store_base_url=url, available_artefacts=set(found))
+
+        get_console().rule("Step 5: Commit and push source")
+        git_commit_and_push(root, "docs: update artefact links", remote, outputs=["README.md"])
+
+        if not skip_verify:
+            get_console().rule("Step 6: Verify deployment")
+            artefact_urls = {kind: url + path.name for kind, path in found.items()}
+            verify_pages(url, max_wait=verify_timeout, artefact_urls=artefact_urls)
+    else:
+        # Local mode: existing behaviour
+        get_console().rule("Step 3: Setup GitHub Pages")
+        url = setup_pages(root, org, repo)
+
+        get_console().rule("Step 4: Commit and push")
+        git_commit_and_push(
+            root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
+        )
+
+        if not skip_verify:
+            get_console().rule("Step 5: Verify deployment")
+            verify_pages(url, max_wait=verify_timeout)
 
     get_console().print(f"\n[bold green]✅ Published![/bold green] {url}")
 
@@ -335,12 +373,23 @@ def pipeline(
     keep_notebook: bool = typer.Option(
         False, "--keep-notebook", help="Don't delete the notebook after publishing."
     ),
+    store: str | None = typer.Option(
+        None,
+        "--store",
+        "-s",
+        help="Publish to external artefact store (org/repo). Uses config default if set.",
+    ),
 ) -> None:
     """Full pipeline: upload → generate → download → pages → push → verify → cleanup.
 
     Creates a NotebookLM notebook (or uses existing), generates all artefacts
     with retry, publishes via GitHub Pages, verifies deployment, then deletes
-    the notebook since artefacts are now hosted in the repo.
+    the notebook since artefacts are now hosted.
+
+    With --store, publishes artefacts to a separate store repo instead of
+    committing binary files into this repo. Configure a default store with:
+
+      mkdir -p ~/.config/repo-artefacts && echo 'default_store = "Org/repo"' > ~/.config/repo-artefacts/config.toml
 
     Artefact selection (pick one mode):
 
@@ -353,6 +402,7 @@ def pipeline(
       --resume: only generate types not yet completed in the notebook.
     """
     from repo_artefacts.collector import collect_repo_content, render_to_pdf
+    from repo_artefacts.config import load_config
     from repo_artefacts.notebooklm import (
         GenerateResult,
         delete_notebook,
@@ -371,8 +421,12 @@ def pipeline(
     root = repo_path.resolve()
     org, repo = get_github_info(root)
     output_dir = root / "docs" / "artefacts"
+    store_slug = store or load_config().default_store
 
-    get_console().print(f"\n[bold]Full pipeline[/bold] for [cyan]{org}/{repo}[/cyan]\n")
+    get_console().print(f"\n[bold]Full pipeline[/bold] for [cyan]{org}/{repo}[/cyan]")
+    if store_slug:
+        get_console().print(f"  Store: [cyan]{store_slug}[/cyan]")
+    get_console().print()
 
     # Step 1: Upload to NotebookLM
     if notebook_id:
@@ -458,20 +512,55 @@ def pipeline(
     for kind, path in found.items():
         get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
 
-    # Step 5: Pages
-    get_console().rule("Step 5: Setup GitHub Pages")
-    url = setup_pages(root, org, repo)
+    # Steps 5-7: Publish, push, verify — branched by store mode
+    artefact_urls: dict[str, str] = {}
 
-    # Step 6: Push
-    get_console().rule("Step 6: Commit and push")
-    git_commit_and_push(
-        root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
-    )
+    if store_slug:
+        from repo_artefacts.pages import get_github_token
+        from repo_artefacts.store import (
+            clone_or_pull_store,
+            commit_and_push_store,
+            publish_to_store,
+        )
 
-    # Step 7: Verify
-    get_console().rule("Step 7: Verify deployment")
-    artefact_urls = {kind: url + path.name for kind, path in found.items()}
-    site_ok, verified = verify_pages(url, max_wait=120, artefact_urls=artefact_urls)
+        # Step 5: Publish to artefact store
+        get_console().rule("Step 5: Publish to artefact store")
+        token = get_github_token()
+        store_path = clone_or_pull_store(store_slug, token)
+        url = publish_to_store(store_path, repo, output_dir)
+        push_ok = commit_and_push_store(store_path, repo)
+        if not push_ok:
+            get_console().print("[red]Store push failed. Keeping notebook for retry.[/red]")
+            get_console().print(
+                f"  Resume: [bold]repo-artefacts pipeline . -n {nb_id} --resume"
+                f" --store {store_slug}[/bold]"
+            )
+            raise typer.Exit(1)
+
+        # Step 6: Update source repo README (no binary files)
+        get_console().rule("Step 6: Update source README")
+        setup_pages(root, org, repo, store_base_url=url, available_artefacts=set(found))
+        git_commit_and_push(root, "docs: update artefact links", remote, outputs=["README.md"])
+
+        # Step 7: Verify store deployment
+        get_console().rule("Step 7: Verify deployment")
+        artefact_urls = {kind: url + path.name for kind, path in found.items()}
+        site_ok, verified = verify_pages(url, max_wait=120, artefact_urls=artefact_urls)
+    else:
+        # Step 5: Local Pages
+        get_console().rule("Step 5: Setup GitHub Pages")
+        url = setup_pages(root, org, repo)
+
+        # Step 6: Push
+        get_console().rule("Step 6: Commit and push")
+        git_commit_and_push(
+            root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
+        )
+
+        # Step 7: Verify
+        get_console().rule("Step 7: Verify deployment")
+        artefact_urls = {kind: url + path.name for kind, path in found.items()}
+        site_ok, verified = verify_pages(url, max_wait=120, artefact_urls=artefact_urls)
 
     # Step 8: Cleanup — only delete if all expected artefacts succeeded
     all_expected_downloaded = expected <= set(found)
@@ -483,7 +572,8 @@ def pipeline(
         get_console().print(f"\n[dim]Notebook kept: {nb_id}[/dim]")
     elif safe_to_delete:
         get_console().rule("Step 8: Cleanup notebook")
-        get_console().print(f"  Deleting notebook {nb_id} (artefacts are now in the repo)")
+        location = f"store ({store_slug})" if store_slug else "repo"
+        get_console().print(f"  Deleting notebook {nb_id} (artefacts are now in the {location})")
         asyncio.run(delete_notebook(nb_id))
     else:
         get_console().rule("Step 8: Notebook preserved")

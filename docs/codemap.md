@@ -18,6 +18,8 @@ graph LR
         NLM[notebooklm.py<br/>API integration]
         PG[pages.py<br/>GitHub Pages setup]
         PUB[publish.py<br/>E2E workflow]
+        ST[store.py<br/>Artefact store ops]
+        CFG[config.py<br/>User config]
     end
 
     subgraph "External Services"
@@ -26,23 +28,24 @@ graph LR
         GHPAGES[GitHub Pages]
     end
 
-    subgraph "Output"
-        AUDIO[audio_overview.mp3]
-        VIDEO[video_overview.mp4]
-        SLIDES[slides.pdf]
-        INFOG[infographic.png]
-        HTML[index.html<br/>Player page]
+    subgraph "Output (local mode)"
+        LOCAL[docs/artefacts/<br/>in source repo]
+    end
+
+    subgraph "Output (store mode)"
+        STORE[artefact-store repo<br/>via GitHub Pages]
     end
 
     REPO --> COL
     COL --> NLM
     NLM --> NLMAPI
     NLMAPI --> NLM
-    NLM --> AUDIO & VIDEO & SLIDES & INFOG
     PG --> GHAPI
-    PG --> HTML
     PUB --> COL & NLM & PG
-    CLI --> COL & NLM & PG & PUB
+    ST --> STORE
+    CLI --> COL & NLM & PG & PUB & ST & CFG
+    NLM --> LOCAL
+    NLM --> ST
 ```
 
 ## Module Breakdown
@@ -59,8 +62,8 @@ Entry point for all CLI commands. Uses [Typer](https://typer.tiangolo.com/) for 
 | `list` | List notebooks or sources | `notebooklm` |
 | `delete` | Delete a notebook | `notebooklm` |
 | `pages` | Set up GitHub Pages player | `pages` |
-| `publish` | Generate → pages → push → verify | `notebooklm` → `pages` → `publish` |
-| `pipeline` | Full E2E: upload → generate → download → pages → push → verify → cleanup | `collector` → `notebooklm` → `pages` → `publish` |
+| `publish` | Generate → pages → push → verify | `notebooklm` → `pages` → `publish` (+ `store` with `--store`) |
+| `pipeline` | Full E2E: upload → generate → download → publish → verify → cleanup | `collector` → `notebooklm` → `pages` → `publish` (+ `store` with `--store`) |
 
 ### collector.py — Repository Content Gathering
 
@@ -205,6 +208,8 @@ See [CI & Testing](ci-and-testing.md) for `act` setup and local testing.
 | `notebooklm` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `list_*()`, `delete_notebook()` | `cli.*`, `publish`, `pipeline` |
 | `pages` | `get_github_info()`, `get_github_token()`, `setup_pages()`, `enable_github_pages()` | `cli.pages`, `cli.publish`, `cli.pipeline` |
 | `publish` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()` | `cli.publish`, `cli.pipeline` |
+| `store` | `clone_or_pull_store()`, `publish_to_store()`, `commit_and_push_store()`, `update_manifest()` | `cli.pipeline`, `cli.publish` |
+| `config` | `load_config()`, `save_config()`, `Config` | `cli.pipeline`, `cli.publish` |
 
 ## Dependencies
 
@@ -214,8 +219,11 @@ graph BT
     CLI --> NLM[notebooklm.py]
     CLI --> PG[pages.py]
     CLI --> PUB[publish.py]
+    CLI --> ST[store.py]
+    CLI --> CFG[config.py]
     PUB --> NLM
     PUB --> PG
+    ST --> PUB
 
     NLM -.-> NLMPY[notebooklm-py]
     COL -.-> MD2PDF[md2pdf-mermaid]

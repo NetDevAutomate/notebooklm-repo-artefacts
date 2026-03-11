@@ -195,24 +195,44 @@ def enable_github_pages(org: str, repo: str) -> bool:
         return False
 
 
-def setup_pages(repo_root: Path, org: str, repo: str) -> str:
-    """Create player page, update README, enable GitHub Pages. Returns player URL."""
-    artefacts_dir = repo_root / "docs" / "artefacts"
-    artefacts_dir.mkdir(parents=True, exist_ok=True)
+def setup_pages(
+    repo_root: Path,
+    org: str,
+    repo: str,
+    store_base_url: str | None = None,
+    available_artefacts: set[str] | None = None,
+) -> str:
+    """Create player page, update README, enable GitHub Pages. Returns player URL.
 
-    # Write player page
-    html_content = (
-        importlib.resources.files("repo_artefacts").joinpath("template.html").read_text()
-    )
-    html_content = html_content.replace("{REPO_NAME}", html_mod.escape(repo, quote=True))
-    (artefacts_dir / "index.html").write_text(html_content)
-    get_console().print("[green]✓[/green] Created docs/artefacts/index.html")
+    Args:
+        store_base_url: If provided, use this URL for README links and skip
+            writing index.html / enabling Pages on the source repo (the store
+            handles both).
+        available_artefacts: Override artefact detection (used with store mode
+            where artefacts aren't in docs/artefacts/).
+    """
+    if store_base_url:
+        # Store mode: only update README with store URLs
+        base_url = store_base_url
+        available = available_artefacts or set()
+    else:
+        # Local mode: write player page, detect artefacts, enable Pages
+        artefacts_dir = repo_root / "docs" / "artefacts"
+        artefacts_dir.mkdir(parents=True, exist_ok=True)
 
-    # Update README (only include rows for artefacts that exist)
-    base_url = f"https://{org.lower()}.github.io/{repo}/artefacts/"
-    from repo_artefacts.publish import check_artefacts
+        html_content = (
+            importlib.resources.files("repo_artefacts").joinpath("template.html").read_text()
+        )
+        html_content = html_content.replace("{REPO_NAME}", html_mod.escape(repo, quote=True))
+        (artefacts_dir / "index.html").write_text(html_content)
+        get_console().print("[green]✓[/green] Created docs/artefacts/index.html")
 
-    available = set(check_artefacts(artefacts_dir))
+        base_url = f"https://{org.lower()}.github.io/{repo}/artefacts/"
+        from repo_artefacts.publish import check_artefacts
+
+        available = available_artefacts or set(check_artefacts(artefacts_dir))
+
+    # Update README (both local and store modes)
     readme = repo_root / "README.md"
     if readme.exists():
         text = readme.read_text()
@@ -230,5 +250,7 @@ def setup_pages(repo_root: Path, org: str, repo: str) -> str:
             get_console().print("[green]✓[/green] Appended artefacts block to README.md")
         readme.write_text(text)
 
-    enable_github_pages(org, repo)
+    if not store_base_url:
+        enable_github_pages(org, repo)
+
     return base_url

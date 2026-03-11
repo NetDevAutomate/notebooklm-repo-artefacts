@@ -93,9 +93,36 @@ repo-artefacts delete -n $NOTEBOOK_ID
 repo-artefacts update-readme --artefacts-dir ./docs/artefacts
 ```
 
+## UC6: Publish to a centralised artefact store
+
+> You want to keep source repos lean — no binary files committed.
+
+```bash
+# One-time: set default store
+mkdir -p ~/.config/repo-artefacts
+echo 'default_store = "NetDevAutomate/artefact-store"' > ~/.config/repo-artefacts/config.toml
+
+# Full pipeline — artefacts go to the store, source repo gets README links only
+repo-artefacts pipeline ./my-repo
+
+# Or explicitly specify the store
+repo-artefacts pipeline ./my-repo --store NetDevAutomate/artefact-store
+```
+
+This will:
+1. Generate artefacts via NotebookLM (same as local mode)
+2. Clone the artefact store (shallow, cached)
+3. Copy artefacts + player page to `store/<repo>/artefacts/`
+4. Update `manifest.json` in the store
+5. Push the store
+6. Update source repo README with links to the store
+7. Push source repo (README only — zero binary files)
+
+Artefacts are served via GitHub Pages from the store (e.g., `artefacts.netdevautomate.dev/my-repo/artefacts/`).
+
 ## Standard Artefact Filenames
 
-All commands expect these filenames in `docs/artefacts/`:
+These filenames are used in both local and store modes:
 
 | File | Type |
 |------|------|
