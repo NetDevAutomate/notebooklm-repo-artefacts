@@ -813,23 +813,28 @@ def validate(
             for artefact_type in repo_entry.get("artefacts", []):
                 from repo_artefacts.publish import STANDARD_FILES
 
-                # Find the filename for this artefact type
-                filename = next(
-                    (fn for fn, kind in STANDARD_FILES.items() if kind == artefact_type), None
-                )
-                if not filename:
+                # Try all possible filenames for this artefact type
+                candidates = [fn for fn, kind in STANDARD_FILES.items() if kind == artefact_type]
+                if not candidates:
                     continue
-                url = f"{base}/{name}/artefacts/{filename}"
-                try:
-                    req = urllib.request.Request(url, method="HEAD")
-                    resp = urllib.request.urlopen(req, timeout=10)
-                    if resp.status == 200:
-                        table.add_row(name, artefact_type, "[green]OK[/green]", url)
-                    else:
-                        table.add_row(name, artefact_type, f"[red]HTTP {resp.status}[/red]", url)
-                        broken += 1
-                except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
-                    table.add_row(name, artefact_type, f"[red]{e}[/red]", url)
+
+                found_ok = False
+                last_url = ""
+                for filename in candidates:
+                    url = f"{base}/{name}/artefacts/{filename}"
+                    last_url = url
+                    try:
+                        req = urllib.request.Request(url, method="HEAD")
+                        resp = urllib.request.urlopen(req, timeout=10)
+                        if resp.status == 200:
+                            table.add_row(name, artefact_type, "[green]OK[/green]", url)
+                            found_ok = True
+                            break
+                    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+                        continue
+
+                if not found_ok:
+                    table.add_row(name, artefact_type, "[red]NOT FOUND[/red]", last_url)
                     broken += 1
 
         get_console().print(table)
