@@ -595,3 +595,149 @@ def pipeline(
         )
 
     get_console().print(f"\n[bold green]✅ Pipeline complete![/bold green] {url}")
+
+
+@app.command()
+@_handle_errors
+def migrate(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    store: str | None = typer.Option(
+        None,
+        "--store",
+        "-s",
+        help="Artefact store repo (org/repo). Uses config default if set.",
+    ),
+    remote: str = typer.Option("origin", "--remote", "-r", help="Git remote to push to."),
+    skip_verify: bool = typer.Option(False, "--skip-verify", help="Skip deployment verification."),
+    verify_timeout: int = typer.Option(
+        120, "--verify-timeout", help="Max seconds to wait for Pages deployment."
+    ),
+    description: str = typer.Option(
+        "", "--description", "-d", help="Short description for the store manifest."
+    ),
+) -> None:
+    """Move artefacts from source repo to the artefact store.
+
+    Copies docs/artefacts/ to the store, updates README links, removes
+    artefacts from the source repo, and pushes both. Does NOT rewrite
+    git history — prints the git-filter-repo command to do that manually.
+    """
+    from repo_artefacts.config import load_config
+    from repo_artefacts.pages import get_github_info, get_github_token, setup_pages
+    from repo_artefacts.publish import check_artefacts, verify_pages
+    from repo_artefacts.store import clone_or_pull_store, commit_and_push_store, publish_to_store
+
+    root = repo_path.resolve()
+    org, repo = get_github_info(root)
+    store_slug = store or load_config().default_store
+    artefacts_dir = root / "docs" / "artefacts"
+
+    if not store_slug:
+        get_console().print(
+            "[red]No store configured. Use --store or set default_store in"
+            " ~/.config/repo-artefacts/config.toml[/red]"
+        )
+        raise typer.Exit(1)
+
+    get_console().print(f"\n[bold]Migrating artefacts[/bold] for [cyan]{org}/{repo}[/cyan]")
+    get_console().print(f"  Store: [cyan]{store_slug}[/cyan]\n")
+
+    # Step 1: Check artefacts exist locally
+    get_console().rule("Step 1: Check local artefacts")
+    found = check_artefacts(artefacts_dir)
+    if not found:
+        get_console().print("[red]No artefact files found in docs/artefacts/[/red]")
+        raise typer.Exit(1)
+    for kind, path in found.items():
+        get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
+
+    # Step 2: Publish to store
+    get_console().rule("Step 2: Publish to artefact store")
+    token = get_github_token()
+    store_path = clone_or_pull_store(store_slug, token)
+    url = publish_to_store(store_path, repo, artefacts_dir, description=description)
+    push_ok = commit_and_push_store(store_path, repo)
+    if not push_ok:
+        get_console().print("[red]Store push failed. Source repo unchanged.[/red]")
+        raise typer.Exit(1)
+
+    # Step 3: Update source README with store URLs
+    get_console().rule("Step 3: Update source README")
+    setup_pages(root, org, repo, store_base_url=url, available_artefacts=set(found))
+
+    # Step 4: Remove artefacts from source repo
+    get_console().rule("Step 4: Remove artefacts from source repo")
+    import subprocess
+
+    # git rm the artefact files (keeps .gitattributes, .gitignore etc.)
+    files_to_remove = [str(p.relative_to(root)) for p in artefacts_dir.iterdir() if p.is_file()]
+    if files_to_remove:
+        result = subprocess.run(
+            ["git", "rm", "--quiet", "--", *files_to_remove],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            get_console().print(
+                f"  [green]✓[/green] Removed {len(files_to_remove)} files from git"
+            )
+        else:
+            # Some files may not be tracked (untracked artefacts)
+            get_console().print(f"  [dim]git rm: {result.stderr.strip()}[/dim]")
+            # Force-remove any that are tracked
+            subprocess.run(
+                ["git", "rm", "--quiet", "--ignore-unmatch", "--", *files_to_remove],
+                cwd=root,
+                capture_output=True,
+            )
+
+    # Step 5: Commit and push (README update + artefact removal)
+    get_console().rule("Step 5: Commit and push")
+    # Stage README explicitly, artefact removals are already staged by git rm
+    subprocess.run(["git", "add", "--", "README.md"], cwd=root, capture_output=True)
+    result = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=root)
+    if result.returncode == 0:
+        get_console().print("  No changes to commit")
+    else:
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "commit",
+                    "-m",
+                    f"chore: migrate artefacts to store ({store_slug})\n\n"
+                    "Artefact files moved to centralised artefact-store repo.\n"
+                    "README links now point to the store's GitHub Pages site.",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(["git", "push", remote], cwd=root, check=True)
+            get_console().print(f"  [green]✓[/green] Pushed to {remote}")
+        except subprocess.CalledProcessError as e:
+            get_console().print(f"  [red]✗[/red] Git failed: {e}")
+            raise typer.Exit(1) from e
+
+    # Step 6: Verify store deployment
+    if not skip_verify:
+        get_console().rule("Step 6: Verify deployment")
+        artefact_urls = {kind: url + path.name for kind, path in found.items()}
+        verify_pages(url, max_wait=verify_timeout, artefact_urls=artefact_urls)
+
+    # Done — suggest history cleanup
+    get_console().print(f"\n[bold green]✅ Migration complete![/bold green] {url}")
+    get_console().print(
+        "\n[dim]Artefacts are now served from the store. The source repo still has"
+        " artefact blobs in git history. To shrink the repo:[/dim]\n"
+    )
+    get_console().print(
+        f"  [bold]cd {root}[/bold]\n"
+        "  [bold]pip install git-filter-repo[/bold]\n"
+        "  [bold]git filter-repo --path docs/artefacts/ --invert-paths[/bold]\n"
+        "  [bold]git push --force-with-lease[/bold]\n"
+    )
+    get_console().print(
+        "[dim]This rewrites history and requires a force push."
+        " All collaborators will need to re-clone.[/dim]"
+    )
