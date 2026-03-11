@@ -110,7 +110,7 @@ class DownloadSpec(NamedTuple):
 # Configuration
 # ---------------------------------------------------------------------------
 
-ARTEFACT_CONFIG: dict[str, dict[str, str]] = {
+ARTEFACT_CONFIG: dict[str, dict[str, str | None]] = {
     "audio": {
         "instructions": "Create an engaging audio overview of this codebase, explaining its architecture, key components, and how they work together",
         "method": "generate_audio",
@@ -124,7 +124,7 @@ ARTEFACT_CONFIG: dict[str, dict[str, str]] = {
         "method": "generate_slide_deck",
     },
     "infographic": {
-        "instructions": "Create an infographic showing the codebase architecture, module relationships, and key workflows",
+        "instructions": None,
         "method": "generate_infographic",
     },
 }
@@ -283,12 +283,13 @@ async def _request_artefact(
     extra_kwargs = _GENERATE_KWARGS.get(artefact, {})
 
     async def _do() -> GenerationStatus:
-        method = getattr(client.artifacts, cfg["method"])
-        return await method(
-            notebook_id,
-            instructions=cfg["instructions"],
-            **extra_kwargs,
-        )
+        method_name = cfg["method"]
+        assert method_name is not None
+        method = getattr(client.artifacts, method_name)
+        kwargs: dict[str, object] = {**extra_kwargs}
+        if cfg["instructions"] is not None:
+            kwargs["instructions"] = cfg["instructions"]
+        return await method(notebook_id, **kwargs)
 
     return await _with_reauth(client, _do, artefact)
 
