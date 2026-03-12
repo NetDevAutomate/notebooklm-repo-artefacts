@@ -271,6 +271,20 @@ async def upload_repo(
                 nb_title = notebook.title
                 get_console().print(f"Created notebook: [bold]{nb_title}[/bold] ({nb_id})")
 
+        # Remove existing sources with the same name to prevent duplicates
+        sources = await _with_reauth(client, lambda: client.sources.list(nb_id), "list sources")
+        filename = content_path.name
+        for src in sources:
+            if src.title == filename:
+                get_console().print(
+                    f"  [dim]Replacing existing source: {src.title} ({src.id[:12]}...)[/dim]"
+                )
+                await _with_reauth(
+                    client,
+                    lambda sid=src.id: client.sources.delete(nb_id, sid),
+                    "delete duplicate source",
+                )
+
         await _with_reauth(
             client,
             lambda: client.sources.add_file(nb_id, content_path),
@@ -403,6 +417,32 @@ async def _poll_by_type(
     return "in_progress"
 
 
+async def _deduplicate_sources(client: NotebookLMClient, notebook_id: str) -> None:
+    """Check for duplicate sources and remove extras, keeping only the newest of each title."""
+    sources = await _with_reauth(client, lambda: client.sources.list(notebook_id), "list sources")
+    # Group by title
+    by_title: dict[str, list] = {}
+    for src in sources:
+        title = src.title or "(untitled)"
+        by_title.setdefault(title, []).append(src)
+
+    for title, group in by_title.items():
+        if len(group) <= 1:
+            continue
+        # Keep the last one (most recently added), delete the rest
+        duplicates = group[:-1]
+        get_console().print(
+            f"  [yellow]⚠[/yellow] Found {len(group)} sources named '{title}'"
+            f" — removing {len(duplicates)} duplicate(s)"
+        )
+        for dup in duplicates:
+            await _with_reauth(
+                client,
+                lambda sid=dup.id: client.sources.delete(notebook_id, sid),
+                f"delete duplicate source {dup.id[:12]}",
+            )
+
+
 async def generate_artefacts(
     notebook_id: str, artefacts: list[str], timeout: int = 900
 ) -> GenerateResult:
@@ -417,6 +457,9 @@ async def generate_artefacts(
     different IDs for generation tasks vs completed artefacts.
     """
     async with await NotebookLMClient.from_storage() as client:
+        # Pre-check: remove duplicate sources to avoid confused generation
+        await _deduplicate_sources(client, notebook_id)
+
         # Snapshot existing artefacts so we can detect new completions
         before = await _snapshot_artefact_ids(client, notebook_id)
         pending: set[str] = set()
