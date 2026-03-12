@@ -10,7 +10,14 @@ from enum import IntEnum
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
-from notebooklm import AudioFormat, GenerationStatus, NotebookLMClient, VideoStyle
+from notebooklm import (
+    AudioFormat,
+    GenerationStatus,
+    InfographicDetail,
+    InfographicOrientation,
+    NotebookLMClient,
+    VideoStyle,
+)
 from notebooklm.exceptions import AuthError, RateLimitError, RPCError
 from rich.table import Table
 
@@ -133,6 +140,10 @@ ARTEFACT_CONFIG: dict[str, dict[str, str | None]] = {
 _GENERATE_KWARGS: dict[str, dict[str, object]] = {
     "audio": {"audio_format": AudioFormat.DEEP_DIVE},
     "video": {"video_style": VideoStyle.WHITEBOARD},
+    "infographic": {
+        "orientation": InfographicOrientation.LANDSCAPE,
+        "detail_level": InfographicDetail.STANDARD,
+    },
 }
 
 
