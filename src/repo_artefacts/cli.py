@@ -289,11 +289,18 @@ def publish(
         asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
         asyncio.run(download_artefacts(nb_id, output_dir))
 
-    # Step 2: Check artefacts exist
+    # Step 2: Check artefacts exist — download from notebook if missing locally
     get_console().rule("Step 2: Check artefacts")
     found = check_artefacts(output_dir)
     if not found:
-        get_console().print("[red]✗ No standard artefact files found in docs/artefacts/[/red]")
+        nb_id = notebook_id or os.environ.get("NOTEBOOK_ID")
+        if nb_id:
+            get_console().print("[dim]No local artefacts — downloading from notebook...[/dim]")
+            asyncio.run(download_artefacts(nb_id, output_dir))
+            found = check_artefacts(output_dir)
+    if not found:
+        get_console().print("[red]✗ No artefact files found locally or in notebook.[/red]")
+        get_console().print("[dim]Use -n NOTEBOOK_ID to download from an existing notebook.[/dim]")
         raise typer.Exit(1)
     for kind, path in found.items():
         get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
