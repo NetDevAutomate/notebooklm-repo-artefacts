@@ -35,6 +35,22 @@ def _handle_errors(func):  # type: ignore[no-untyped-def]
     return wrapper
 
 
+def _get_git_root(repo_path: Path) -> Path:
+    """Get the git repository root directory. Falls back to repo_path if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            cwd=repo_path,
+        )
+        if result.returncode == 0:
+            return Path(result.stdout.strip())
+    except FileNotFoundError:
+        pass
+    return repo_path.resolve()
+
+
 def _get_repo_name(repo_path: Path) -> str:
     """Get repo name from git remote origin, falling back to directory name."""
     try:
@@ -222,7 +238,7 @@ def pages(
     """
     from repo_artefacts.pages import get_github_info, setup_pages
 
-    root = repo_path.resolve()
+    root = _get_git_root(repo_path)
     if not org or not repo:
         org, repo = get_github_info(root)
 
@@ -273,7 +289,7 @@ def publish(
         verify_pages,
     )
 
-    root = repo_path.resolve()
+    root = _get_git_root(repo_path)
     org, repo = get_github_info(root)
     store_slug = store or load_config().default_store
     output_dir = root / "docs" / "artefacts"
@@ -425,7 +441,7 @@ def pipeline(
         verify_pages,
     )
 
-    root = repo_path.resolve()
+    root = _get_git_root(repo_path)
     org, repo = get_github_info(root)
     output_dir = root / "docs" / "artefacts"
     store_slug = store or load_config().default_store
@@ -634,7 +650,7 @@ def migrate(
     from repo_artefacts.publish import check_artefacts, verify_pages
     from repo_artefacts.store import clone_or_pull_store, commit_and_push_store, publish_to_store
 
-    root = repo_path.resolve()
+    root = _get_git_root(repo_path)
     org, repo = get_github_info(root)
     store_slug = store or load_config().default_store
     artefacts_dir = root / "docs" / "artefacts"
@@ -852,7 +868,7 @@ def validate(
         return
 
     # Single repo mode: parse README for artefact URLs
-    root = repo_path.resolve()
+    root = _get_git_root(repo_path)
     readme = root / "README.md"
     if not readme.exists():
         get_console().print("[red]No README.md found.[/red]")
