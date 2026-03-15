@@ -239,15 +239,16 @@ async def upload_repo(
     content_path: Path,
     repo_name: str,
     notebook_id: str | None = None,
-) -> dict[str, str]:
+) -> dict:
     """Upload collected repo content to a NotebookLM notebook.
 
     Checks for existing notebook with matching title before creating a new one.
 
     Returns:
-        Dict with keys: id, title.
+        Dict with keys: id, title, source_replaced.
     """
     async with await NotebookLMClient.from_storage() as client:
+        source_replaced = False
         if notebook_id:
             nb_id = notebook_id
             nb_title = repo_name
@@ -284,6 +285,7 @@ async def upload_repo(
                     lambda sid=src.id: client.sources.delete(nb_id, sid),
                     "delete duplicate source",
                 )
+                source_replaced = True
 
         await _with_reauth(
             client,
@@ -294,7 +296,7 @@ async def upload_repo(
             f"  [green]✓[/green] Uploaded {content_path.name} (ingestion complete)"
         )
 
-    return {"id": nb_id, "title": nb_title}
+    return {"id": nb_id, "title": nb_title, "source_replaced": source_replaced}
 
 
 # ---------------------------------------------------------------------------

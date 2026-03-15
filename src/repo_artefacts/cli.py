@@ -452,6 +452,7 @@ def pipeline(
     get_console().print()
 
     # Step 1: Upload to NotebookLM
+    source_replaced = False
     if notebook_id:
         nb_id = notebook_id
         get_console().rule("Step 1: Using existing notebook")
@@ -464,6 +465,7 @@ def pipeline(
         pdf_path = render_to_pdf(md_path)
         result = asyncio.run(upload_repo(pdf_path, repo))
         nb_id = result["id"]
+        source_replaced = bool(result.get("source_replaced"))
         # Clean up temp files
         md_path.unlink(missing_ok=True)
         pdf_path.unlink(missing_ok=True)
@@ -501,8 +503,10 @@ def pipeline(
         # Default: all
         target = list(ALL_ARTEFACTS)
 
-    # --resume or default: skip already-completed
-    if resume or (not selected and not exclude):
+    # --resume or default: skip already-completed (unless source was replaced)
+    if source_replaced:
+        get_console().print("  [yellow]Source was replaced — regenerating all artefacts[/yellow]")
+    elif resume or (not selected and not exclude):
         already_done = asyncio.run(get_completed_artefacts(nb_id))
         if already_done:
             get_console().print(
