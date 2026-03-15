@@ -287,10 +287,12 @@ async def upload_repo(
 
         await _with_reauth(
             client,
-            lambda: client.sources.add_file(nb_id, content_path),
+            lambda: client.sources.add_file(nb_id, content_path, wait=True, wait_timeout=180.0),
             "upload source",
         )
-        get_console().print(f"  [green]✓[/green] Uploaded {content_path.name}")
+        get_console().print(
+            f"  [green]✓[/green] Uploaded {content_path.name} (ingestion complete)"
+        )
 
     return {"id": nb_id, "title": nb_title}
 
