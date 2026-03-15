@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
@@ -29,9 +27,6 @@ T = TypeVar("T")
 REAUTH_BACKOFF = [2, 10, 30]  # seconds between re-auth retries
 RATE_LIMIT_BACKOFF = [30, 60, 300]  # escalating backoff for rate limits
 
-# Strings in GenerationStatus.error that indicate daily quota exhaustion
-# (not transient — retrying won't help until the 24h reset)
-QUOTA_ERROR_PATTERNS = ["rate limit", "quota exceeded", "quota"]
 
 
 # ---------------------------------------------------------------------------
@@ -98,23 +93,12 @@ _GENERATE_KWARGS: dict[str, dict[str, object]] = {
 }
 
 
-@dataclass
-class GenerateResult:
-    """Outcome of a generate_artefacts() call."""
-
-    completed: set[str]
-    failed: set[str]
-    quota_exhausted: set[str]
-
-
 DOWNLOAD_MAP: list[DownloadSpec] = [
     DownloadSpec("audio", "list_audio", "download_audio", "audio_overview.mp3"),
     DownloadSpec("video", "list_video", "download_video", "video_overview.mp4"),
     DownloadSpec("slides", "list_slide_decks", "download_slide_deck", "slides.pdf"),
     DownloadSpec("infographic", "list_infographics", "download_infographic", "infographic.png"),
 ]
-
-MAX_RETRIES = 3
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +157,6 @@ async def _with_reauth(
         return await fn()
     except RPCError as exc:
         raise (last_exc or RPCError(f"{label} failed after re-auth retries")) from exc  # type: ignore[call-arg]
-
-
-def _is_quota_error(error_msg: str) -> bool:
-    """Check if an error message indicates daily quota exhaustion."""
-    lower = error_msg.lower()
-    return any(p in lower for p in QUOTA_ERROR_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -274,59 +252,6 @@ async def _request_artefact(
     return await _with_reauth(client, _do, artefact)
 
 
-async def _delete_existing_by_type(
-    client: NotebookLMClient,
-    notebook_id: str,
-    artefact: str,
-    *,
-    failed_only: bool = False,
-) -> None:
-    """Delete artefacts of the given type before (re)generation.
-
-    Args:
-        failed_only: If True, only delete FAILED artefacts (used during retry).
-            If False, delete ALL artefacts of this type including completed
-            (used when explicitly requesting regeneration).
-    """
-    target_kind = NAME_TO_KIND[artefact]
-    artifacts = await _with_reauth(
-        client, lambda: client.artifacts.list(notebook_id), f"list {artefact}"
-    )
-    for art in artifacts:
-        if art.kind != target_kind:
-            continue
-        should_delete = art.is_failed or not failed_only
-        if should_delete:
-            get_console().print(
-                f"  [dim]Deleting {art.status_str} {artefact} ({art.id[:12]}...)[/dim]"
-            )
-            await _with_reauth(
-                client,
-                lambda aid=art.id: client.artifacts.delete(notebook_id, aid),
-                f"delete {artefact}",
-            )
-        else:
-            get_console().print(
-                f"  [dim]{artefact}: found existing with status"
-                f" {art.status_str} ({art.id[:12]}...)[/dim]"
-            )
-
-
-async def _snapshot_artefact_ids(
-    client: NotebookLMClient, notebook_id: str
-) -> dict[str, set[str]]:
-    """Snapshot existing artefact IDs by config key name."""
-    artifacts = await _with_reauth(
-        client, lambda: client.artifacts.list(notebook_id), "snapshot artefacts"
-    )
-    result: dict[str, set[str]] = {name: set() for name in ARTEFACT_CONFIG}
-    for art in artifacts:
-        name = _artifact_config_name(art)
-        if name and name in result:
-            result[name].add(art.id)
-    return result
-
-
 async def get_completed_artefacts(notebook_id: str) -> set[str]:
     """Return set of our config key names for completed artefacts in the notebook."""
     async with await NotebookLMClient.from_storage() as client:
@@ -344,247 +269,6 @@ async def get_completed_artefacts(notebook_id: str) -> set[str]:
     return result
 
 
-async def _poll_by_type(
-    client: NotebookLMClient,
-    notebook_id: str,
-    artefact: str,
-    known_ids: set[str],
-) -> str:
-    """Find a new or changed artefact of the given type. Returns status string."""
-    target_kind = NAME_TO_KIND[artefact]
-    artifacts = await _with_reauth(
-        client, lambda: client.artifacts.list(notebook_id), f"poll {artefact}"
-    )
-    for art in artifacts:
-        if art.kind != target_kind:
-            continue
-        if art.id not in known_ids or art.is_completed or art.is_failed:
-            if art.is_completed:
-                return "completed"
-            if art.is_failed:
-                return "failed"
-            if art.is_processing or art.is_pending:
-                return "in_progress"
-    return "in_progress"
-
-
-async def _deduplicate_sources(client: NotebookLMClient, notebook_id: str) -> None:
-    """Check for duplicate sources and remove extras, keeping only the newest of each title."""
-    sources = await _with_reauth(client, lambda: client.sources.list(notebook_id), "list sources")
-    # Group by title
-    by_title: dict[str, list] = {}
-    for src in sources:
-        title = src.title or "(untitled)"
-        by_title.setdefault(title, []).append(src)
-
-    for title, group in by_title.items():
-        if len(group) <= 1:
-            continue
-        # Keep the last one (most recently added), delete the rest
-        duplicates = group[:-1]
-        get_console().print(
-            f"  [yellow]⚠[/yellow] Found {len(group)} sources named '{title}'"
-            f" — removing {len(duplicates)} duplicate(s)"
-        )
-        for dup in duplicates:
-            await _with_reauth(
-                client,
-                lambda sid=dup.id: client.sources.delete(notebook_id, sid),
-                f"delete duplicate source {dup.id[:12]}",
-            )
-
-
-async def generate_artefacts(
-    notebook_id: str, artefacts: list[str], timeout: int = 900
-) -> GenerateResult:
-    """Generate requested artefact types with retry on failure.
-
-    Handles three failure modes:
-    - Daily quota exhaustion (infographics/slides have stricter caps) -> bail early
-    - Stale auth/CSRF -> refresh_auth + retry
-    - Transient RPC errors -> backoff + retry
-
-    Polls by artefact type (not task_id) because the NotebookLM API returns
-    different IDs for generation tasks vs completed artefacts.
-    """
-    async with await NotebookLMClient.from_storage() as client:
-        # Pre-check: remove duplicate sources to avoid confused generation
-        await _deduplicate_sources(client, notebook_id)
-
-        # Snapshot existing artefacts so we can detect new completions
-        before = await _snapshot_artefact_ids(client, notebook_id)
-        pending: set[str] = set()
-        retries: dict[str, int] = {a: 0 for a in artefacts}
-        quota_exhausted: set[str] = set()
-        completed: set[str] = set()
-        permanently_failed: set[str] = set()
-
-        for artefact in artefacts:
-            get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
-            try:
-                await _delete_existing_by_type(client, notebook_id, artefact)
-                status = await _request_artefact(client, notebook_id, artefact)
-                if status.is_failed or not status.task_id:
-                    err = status.error or "no artifact_id returned"
-                    err_detail = (
-                        f"error={status.error!r}, error_code={status.error_code!r},"
-                        f" task_id={status.task_id!r}, status={status.status!r},"
-                        f" metadata={status.metadata!r}"
-                    )
-                    if _is_quota_error(err):
-                        # Refresh auth and try once more to distinguish
-                        # quota exhaustion from stale CSRF
-                        get_console().print(
-                            f"[yellow]⚠[/yellow] {artefact} rejected ({err})"
-                            " — refreshing auth to confirm..."
-                        )
-                        await client.refresh_auth()
-                        await asyncio.sleep(5)
-                        status = await _request_artefact(client, notebook_id, artefact)
-                        if status.is_failed or not status.task_id:
-                            quota_exhausted.add(artefact)
-                            get_console().print(
-                                f"[red]✗[/red] {artefact}: daily quota exhausted"
-                                " (NotebookLM caps infographics/slides"
-                                " separately). Retry after 24h reset."
-                            )
-                            continue
-                        else:
-                            # Auth refresh fixed it — was stale CSRF
-                            pending.add(artefact)
-                            continue
-                    retries[artefact] += 1
-                    get_console().print(
-                        f"[yellow]⚠[/yellow] {artefact} failed immediately"
-                        f" ({err})"
-                        f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
-                    )
-                    get_console().print(f"  [dim]Detail: {err_detail}[/dim]")
-                    await client.refresh_auth()
-                else:
-                    pending.add(artefact)
-            except Exception as e:
-                retries[artefact] += 1
-                get_console().print(
-                    f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
-                    f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
-                )
-
-        # Queue initial failures for retry (excluding quota-exhausted)
-        needs_retry = [
-            a
-            for a in artefacts
-            if a not in pending and a not in quota_exhausted and retries[a] <= MAX_RETRIES
-        ]
-
-        start_time = time.monotonic()
-        deadline = start_time + timeout
-        poll_interval = 30
-
-        get_console().print(
-            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]"
-        )
-
-        while (pending or needs_retry) and time.monotonic() < deadline:
-            # Retry any queued failures — refresh auth + backoff first
-            for label in list(needs_retry):
-                backoff = RATE_LIMIT_BACKOFF[min(retries[label] - 1, len(RATE_LIMIT_BACKOFF) - 1)]
-                get_console().print(
-                    f"[blue]⏳[/blue] Retrying {label}"
-                    f" ({retries[label]}/{MAX_RETRIES})"
-                    f" — backoff {backoff}s + auth refresh..."
-                )
-                await asyncio.sleep(backoff)
-                await client.refresh_auth()
-                get_console().print("[green]✓[/green] Auth refreshed")
-                try:
-                    await _delete_existing_by_type(client, notebook_id, label, failed_only=True)
-                    status = await _request_artefact(client, notebook_id, label)
-                    if status.is_failed or not status.task_id:
-                        retries[label] += 1
-                        if retries[label] > MAX_RETRIES:
-                            get_console().print(
-                                f"[red]✗[/red] {label} failed after"
-                                f" {MAX_RETRIES} retries: {status.error}"
-                            )
-                            permanently_failed.add(label)
-                            needs_retry.remove(label)
-                        # else stays in needs_retry for next loop
-                    else:
-                        pending.add(label)
-                        needs_retry.remove(label)
-                except Exception as e:
-                    retries[label] += 1
-                    if retries[label] > MAX_RETRIES:
-                        get_console().print(
-                            f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries: {e}"
-                        )
-                        permanently_failed.add(label)
-                        needs_retry.remove(label)
-
-            if not pending and not needs_retry:
-                break
-
-            await asyncio.sleep(poll_interval)
-
-            # Poll by artefact type (not task_id — they don't match)
-            elapsed = int(time.monotonic() - start_time)
-            for label in list(pending):
-                try:
-                    status_str = await _poll_by_type(
-                        client, notebook_id, label, before.get(label, set())
-                    )
-                except Exception as e:
-                    get_console().print(
-                        f"[yellow]⚠[/yellow] Poll error for {label}: {e} — refreshing auth"
-                    )
-                    await client.refresh_auth()
-                    continue
-
-                if status_str == "completed":
-                    get_console().print(f"[green]✓[/green] {label.capitalize()} ready")
-                    completed.add(label)
-                    pending.discard(label)
-                elif status_str == "failed":
-                    pending.discard(label)
-                    retries[label] += 1
-                    if retries[label] <= MAX_RETRIES:
-                        get_console().print(
-                            f"[yellow]⚠[/yellow] {label} failed"
-                            f" — queued retry ({retries[label]}/{MAX_RETRIES})"
-                        )
-                        if label not in needs_retry:
-                            needs_retry.append(label)
-                    else:
-                        get_console().print(
-                            f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries"
-                        )
-                        permanently_failed.add(label)
-                else:
-                    get_console().print(f"[dim]  … {label} still generating ({elapsed}s)[/dim]")
-
-        timed_out: set[str] = set()
-        for label in list(pending) + needs_retry:
-            get_console().print(f"[red]✗[/red] {label.capitalize()} timed out")
-            timed_out.add(label)
-
-        if quota_exhausted:
-            get_console().print(
-                f"\n[yellow]i[/yellow] Quota-limited artefacts: "
-                f"[bold]{', '.join(sorted(quota_exhausted))}[/bold]"
-                "\n  NotebookLM enforces separate daily caps for"
-                " infographics (~20-25/day Pro) and slides."
-                "\n  These reset 24h from first daily use (UTC)."
-                "\n  Retry tomorrow: repo-artefacts generate"
-                f" {''.join(f' --{a}' for a in sorted(quota_exhausted))}"
-            )
-
-    get_console().print("[bold green]Done.[/bold green]")
-    return GenerateResult(
-        completed=completed,
-        failed=permanently_failed | timed_out,
-        quota_exhausted=quota_exhausted,
-    )
 
 
 # ---------------------------------------------------------------------------

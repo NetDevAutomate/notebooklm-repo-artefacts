@@ -12,13 +12,9 @@ from repo_artefacts.notebooklm import (
     ARTEFACT_CONFIG,
     DOWNLOAD_MAP,
     KIND_TO_NAME,
-    MAX_RETRIES,
     NAME_TO_KIND,
     _artifact_config_name,
-    _delete_existing_by_type,
-    _poll_by_type,
     _request_artefact,
-    _snapshot_artefact_ids,
 )
 
 # ---------------------------------------------------------------------------
@@ -26,10 +22,7 @@ from repo_artefacts.notebooklm import (
 # ---------------------------------------------------------------------------
 
 # Upstream ArtifactStatus int codes (from notebooklm._artifacts)
-_PROCESSING = 1
-_PENDING = 2
 _COMPLETED = 3
-_FAILED = 4
 
 # Upstream ArtifactTypeCode int codes
 _TYPE_AUDIO = 1
@@ -136,137 +129,6 @@ def test_download_map_filenames_are_standard() -> None:
     }
     actual = {entry.filename for entry in DOWNLOAD_MAP}
     assert actual == expected
-
-
-def test_max_retries_is_reasonable() -> None:
-    assert 1 <= MAX_RETRIES <= 5
-
-
-# ---------------------------------------------------------------------------
-# Snapshot
-# ---------------------------------------------------------------------------
-
-
-async def test_snapshot_artefact_ids() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="id-1", type_code=_TYPE_AUDIO, status=_COMPLETED),
-            _make_artifact(artifact_id="id-2", type_code=_TYPE_VIDEO, status=_FAILED),
-        ]
-    )
-    result = await _snapshot_artefact_ids(client, "nb-1")
-    assert "id-1" in result["audio"]
-    assert "id-2" in result["video"]
-    assert result["slides"] == set()
-
-
-# ---------------------------------------------------------------------------
-# Poll by type
-# ---------------------------------------------------------------------------
-
-
-async def test_poll_by_type_detects_completion() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="new-id", type_code=_TYPE_AUDIO, status=_COMPLETED)
-        ]
-    )
-    status = await _poll_by_type(client, "nb-1", "audio", set())
-    assert status == "completed"
-
-
-async def test_poll_by_type_detects_failure() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="new-id", type_code=_TYPE_INFOGRAPHIC, status=_FAILED)
-        ]
-    )
-    status = await _poll_by_type(client, "nb-1", "infographic", set())
-    assert status == "failed"
-
-
-async def test_poll_by_type_in_progress() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="new-id", type_code=_TYPE_SLIDE_DECK, status=_PROCESSING)
-        ]
-    )
-    status = await _poll_by_type(client, "nb-1", "slides", set())
-    assert status == "in_progress"
-
-
-async def test_poll_by_type_known_completed_still_reported() -> None:
-    """Known completed IDs still report completed status."""
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="old-id", type_code=_TYPE_AUDIO, status=_COMPLETED)
-        ]
-    )
-    status = await _poll_by_type(client, "nb-1", "audio", {"old-id"})
-    assert status == "completed"
-
-
-async def test_poll_ignores_other_types() -> None:
-    """Polling for audio should not match a video artefact."""
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="vid-1", type_code=_TYPE_VIDEO, status=_COMPLETED)
-        ]
-    )
-    status = await _poll_by_type(client, "nb-1", "audio", set())
-    assert status == "in_progress"
-
-
-# ---------------------------------------------------------------------------
-# Delete existing by type
-# ---------------------------------------------------------------------------
-
-
-async def test_delete_existing_deletes_failed() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="good-id", type_code=_TYPE_INFOGRAPHIC, status=_COMPLETED),
-            _make_artifact(artifact_id="bad-id", type_code=_TYPE_INFOGRAPHIC, status=_FAILED),
-        ]
-    )
-    client.artifacts.delete = AsyncMock()
-    # Default: delete ALL existing (including completed)
-    await _delete_existing_by_type(client, "nb-1", "infographic")
-    assert client.artifacts.delete.call_count == 2
-
-
-async def test_delete_existing_failed_only() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="good-id", type_code=_TYPE_INFOGRAPHIC, status=_COMPLETED),
-            _make_artifact(artifact_id="bad-id", type_code=_TYPE_INFOGRAPHIC, status=_FAILED),
-        ]
-    )
-    client.artifacts.delete = AsyncMock()
-    # failed_only=True: only delete failed, leave completed
-    await _delete_existing_by_type(client, "nb-1", "infographic", failed_only=True)
-    client.artifacts.delete.assert_called_once_with("nb-1", "bad-id")
-
-
-async def test_delete_existing_skips_other_types() -> None:
-    client = MagicMock()
-    client.artifacts.list = AsyncMock(
-        return_value=[
-            _make_artifact(artifact_id="ok-id", type_code=_TYPE_AUDIO, status=_COMPLETED)
-        ]
-    )
-    client.artifacts.delete = AsyncMock()
-    # Audio shouldn't be deleted when targeting infographic
-    await _delete_existing_by_type(client, "nb-1", "infographic")
-    client.artifacts.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
