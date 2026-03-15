@@ -118,6 +118,7 @@ class PipelineContext:
     output_dir: Path = field(default_factory=lambda: Path("docs/artefacts"))
     keep_notebook: bool = False
     force_regen: bool = False
+    dry_run: bool = False
     timeout: int = 900
     state: PipelineState = field(default_factory=PipelineState)
     state_path: Path = field(default_factory=lambda: Path(STATE_FILENAME))
@@ -595,12 +596,33 @@ def _resolve_repo_name(repo_path: Path) -> str:
     return repo_path.resolve().name
 
 
+def _notify(title: str, message: str) -> None:
+    """Send a macOS notification. Silent no-op on other platforms."""
+    import platform
+    import subprocess as sp
+
+    if platform.system() != "Darwin":
+        return
+    try:
+        sp.run(
+            [
+                "osascript", "-e",
+                f'display notification "{message}" with title "{title}"',
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort
+
+
 def run_pipeline(
     repo_path: Path,
     *,
     store_slug: str | None = None,
     keep_notebook: bool = False,
     force_regen: bool = False,
+    dry_run: bool = False,
     resume: bool = False,
     timeout: int = 900,
 ) -> bool:
@@ -625,6 +647,7 @@ def run_pipeline(
         output_dir=output_dir,
         keep_notebook=keep_notebook,
         force_regen=force_regen,
+        dry_run=dry_run,
         timeout=timeout,
         state=state,
         state_path=state_path,
@@ -634,12 +657,16 @@ def run_pipeline(
     console.print(f"\n[bold]Pipeline for {repo_name}[/bold]")
     if store_slug:
         console.print(f"  Store: [cyan]{store_slug}[/cyan]")
+    if dry_run:
+        console.print("  [yellow]DRY RUN — no changes will be made[/yellow]")
     console.print()
 
+    pipeline_start = time.monotonic()
     all_passed = True
 
     for stage in ALL_STAGES:
         console.rule(f"Stage: {stage.name}")
+        stage_start = time.monotonic()
 
         # Pre-check
         pre = stage.pre_check(ctx)
@@ -654,6 +681,13 @@ def run_pipeline(
             ctx.save_state()
             all_passed = False
             break
+
+        # Dry run: show what would happen, don't execute
+        if dry_run:
+            console.print(f"  [dim]Would execute: {stage.name}[/dim]")
+            ctx.state.set_stage(stage.name, "dry_run")
+            ctx.save_state()
+            continue
 
         # Execute
         try:
@@ -681,15 +715,21 @@ def run_pipeline(
             all_passed = False
             break
 
-        console.print(f"  [green]✓ {stage.name}: {result.message}[/green]")
-        ctx.state.set_stage(stage.name, "pass", **result.data)
+        # Metrics: track stage duration
+        stage_duration = round(time.monotonic() - stage_start, 1)
+        console.print(f"  [green]✓ {stage.name}: {result.message}[/green] [dim]({stage_duration}s)[/dim]")
+        ctx.state.set_stage(stage.name, "pass", duration_s=stage_duration, **result.data)
         ctx.save_state()
 
+    total_duration = round(time.monotonic() - pipeline_start, 1)
+
     if all_passed:
-        console.print("\n[bold green]Pipeline complete![/bold green]")
+        console.print(f"\n[bold green]Pipeline complete![/bold green] [dim]({total_duration}s)[/dim]")
+        _notify("repo-artefacts", f"Pipeline complete for {repo_name} ({total_duration}s)")
     else:
-        console.print("\n[bold red]Pipeline failed.[/bold red]")
+        console.print(f"\n[bold red]Pipeline failed.[/bold red] [dim]({total_duration}s)[/dim]")
         console.print(f"State saved to: {state_path}")
         console.print("Resume with: repo-artefacts pipeline --resume ...")
+        _notify("repo-artefacts", f"Pipeline FAILED for {repo_name}")
 
     return all_passed

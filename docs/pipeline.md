@@ -249,7 +249,27 @@ repo-artefacts pipeline /path/to/repo --store Org/store --resume
 | `--resume` | Resume from previous pipeline state | `false` |
 | `--keep-notebook` | Don't delete the notebook after publishing | `false` |
 | `--force-regen` | Force regeneration of all artefacts | `false` |
+| `--dry-run` | Show what each stage would do without executing | `false` |
 | `-t, --timeout` | Generation timeout per artefact (seconds) | `900` |
+
+## Metrics
+
+Each stage records its duration in the pipeline state file. This lets you track performance over time:
+
+```json
+{
+  "stages": {
+    "collect": {"status": "pass", "duration_s": 12.3},
+    "upload":  {"status": "pass", "duration_s": 45.1},
+    "generate": {"status": "pass", "duration_s": 180.5},
+    "download": {"status": "pass", "duration_s": 8.2}
+  }
+}
+```
+
+## Notifications
+
+On macOS, a system notification is sent when the pipeline completes or fails. This is useful since generation can take 15+ minutes. No configuration needed — it uses `osascript` and is a silent no-op on other platforms.
 
 ## Safety Guarantees
 

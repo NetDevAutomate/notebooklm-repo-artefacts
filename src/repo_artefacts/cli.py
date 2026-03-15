@@ -138,6 +138,9 @@ def generate(
     all_: bool = typer.Option(
         False, "--all", help="Generate all artefact types (default if none specified)."
     ),
+    force_regen: bool = typer.Option(
+        False, "--force-regen", help="Force regeneration (deletes existing completed artefacts)."
+    ),
     timeout: int = typer.Option(
         900,
         "--timeout",
@@ -145,8 +148,12 @@ def generate(
         help="Timeout in seconds per artefact (default: 900 = 15min).",
     ),
 ) -> None:
-    """Generate artefacts from a NotebookLM notebook."""
-    from repo_artefacts.notebooklm import generate_artefacts
+    """Generate artefacts from a NotebookLM notebook.
+
+    Idempotent by default — only generates missing artefact types and only
+    deletes FAILED artefacts. Use --force-regen to regenerate everything.
+    """
+    from repo_artefacts.pipeline import GenerateStage, PipelineContext, PipelineState
 
     nb_id = _get_notebook_id(notebook_id)
 
@@ -164,7 +171,26 @@ def generate(
         selected = ALL_ARTEFACTS
 
     get_console().print(f"Generating: [bold]{', '.join(selected)}[/bold]")
-    asyncio.run(generate_artefacts(nb_id, selected, timeout=timeout))
+
+    # Use the safe GenerateStage which only deletes failed artefacts
+    state = PipelineState(notebook_id=nb_id)
+    ctx = PipelineContext(
+        repo_path=Path("."),
+        state=state,
+        force_regen=force_regen,
+        timeout=timeout,
+    )
+
+    stage = GenerateStage()
+    pre = stage.pre_check(ctx)
+    if pre.status != "pass":
+        get_console().print(f"[red]{pre.message}[/red]")
+        raise typer.Exit(1)
+
+    result = stage.execute(ctx)
+    if result.status != "pass":
+        get_console().print(f"[red]{result.message}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -258,12 +284,8 @@ def publish(
         False, "--skip-generate", help="Skip artefact generation (use existing files)."
     ),
     skip_verify: bool = typer.Option(False, "--skip-verify", help="Skip page verification."),
-    remote: str = typer.Option("origin", "--remote", "-r", help="Git remote to push to."),
     timeout: int = typer.Option(
         900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
-    ),
-    verify_timeout: int = typer.Option(
-        120, "--verify-timeout", help="Max seconds to wait for Pages deployment."
     ),
     store: str | None = typer.Option(
         None,
@@ -272,96 +294,80 @@ def publish(
         help="Publish to external artefact store (org/repo). Uses config default if set.",
     ),
 ) -> None:
-    """End-to-end: generate artefacts → setup pages → push → verify.
+    """Publish artefacts: generate → download → publish to store → verify.
 
-    Generates all NotebookLM artefacts, sets up the GitHub Pages player,
-    commits and pushes, then verifies the hosted page is live.
-
-    With --store, publishes artefacts to a separate store repo instead of
-    committing binary files into this repo.
+    Uses the same safe pipeline stages as the `pipeline` command.
+    With --store, publishes to a separate repo via GitHub Pages.
     """
     from repo_artefacts.config import load_config
-    from repo_artefacts.notebooklm import download_artefacts, generate_artefacts
-    from repo_artefacts.pages import get_github_info, get_github_token, setup_pages
-    from repo_artefacts.publish import (
-        check_artefacts,
-        git_commit_and_push,
-        verify_pages,
+    from repo_artefacts.pipeline import (
+        DownloadStage,
+        GenerateStage,
+        PipelineContext,
+        PipelineState,
+        PublishStage,
+        ReadmeStage,
+        Status,
+        VerifyStage,
+        _resolve_repo_name,
     )
 
     root = _get_git_root(repo_path)
-    org, repo = get_github_info(root)
     store_slug = store or load_config().default_store
+    repo_name = _resolve_repo_name(root)
     output_dir = root / "docs" / "artefacts"
 
-    get_console().print(f"\n[bold]Publishing artefacts[/bold] for [cyan]{org}/{repo}[/cyan]\n")
+    get_console().print(f"\n[bold]Publishing artefacts[/bold] for [cyan]{repo_name}[/cyan]\n")
     if store_slug:
         get_console().print(f"  Store: [cyan]{store_slug}[/cyan]")
 
-    # Step 1: Generate artefacts
-    if not skip_generate:
-        nb_id = _get_notebook_id(notebook_id)
-        get_console().rule("Step 1: Generate artefacts")
-        asyncio.run(generate_artefacts(nb_id, ALL_ARTEFACTS, timeout=timeout))
-        asyncio.run(download_artefacts(nb_id, output_dir))
+    state = PipelineState(repo_name=repo_name)
+    if notebook_id:
+        state.notebook_id = notebook_id
 
-    # Step 2: Check artefacts exist — download from notebook if missing locally
-    get_console().rule("Step 2: Check artefacts")
-    found = check_artefacts(output_dir)
-    if not found:
-        nb_id = notebook_id or os.environ.get("NOTEBOOK_ID")
-        if nb_id:
-            get_console().print("[dim]No local artefacts — downloading from notebook...[/dim]")
-            asyncio.run(download_artefacts(nb_id, output_dir))
-            found = check_artefacts(output_dir)
-    if not found:
-        get_console().print("[red]✗ No artefact files found locally or in notebook.[/red]")
-        get_console().print("[dim]Use -n NOTEBOOK_ID to download from an existing notebook.[/dim]")
-        raise typer.Exit(1)
-    for kind, path in found.items():
-        get_console().print(f"  [green]✓[/green] {kind}: {path.name}")
+    ctx = PipelineContext(
+        repo_path=root,
+        store_slug=store_slug or None,
+        output_dir=output_dir,
+        state=state,
+        timeout=timeout,
+    )
 
+    # Run selected stages
+    stages = []
+    if not skip_generate and state.notebook_id:
+        stages.append(GenerateStage())
+        stages.append(DownloadStage())
     if store_slug:
-        # Store mode: publish to artefact store, update source README only
-        from repo_artefacts.store import (
-            clone_or_pull_store,
-            commit_and_push_store,
-            publish_to_store,
-        )
+        stages.append(PublishStage())
+        if not skip_verify:
+            stages.append(VerifyStage())
+        stages.append(ReadmeStage())
 
-        get_console().rule("Step 3: Publish to artefact store")
-        token = get_github_token()
-        store_path = clone_or_pull_store(store_slug, token)
-        url = publish_to_store(store_path, repo, output_dir)
-        push_ok = commit_and_push_store(store_path, repo)
-        if not push_ok:
+    if not stages:
+        get_console().print("[yellow]Nothing to do. Use -n NOTEBOOK_ID or --store.[/yellow]")
+        raise typer.Exit(1)
+
+    for stage in stages:
+        get_console().rule(f"Stage: {stage.name}")
+        pre = stage.pre_check(ctx)
+        if pre.status == Status.SKIP:
+            get_console().print(f"  [dim]Skipped: {pre.message}[/dim]")
+            continue
+        if pre.status == Status.FAIL:
+            get_console().print(f"  [red]Pre-check failed: {pre.message}[/red]")
             raise typer.Exit(1)
+        result = stage.execute(ctx)
+        if result.status == Status.FAIL:
+            get_console().print(f"  [red]Failed: {result.message}[/red]")
+            raise typer.Exit(1)
+        post = stage.post_check(ctx)
+        if post.status == Status.FAIL:
+            get_console().print(f"  [red]Post-check failed: {post.message}[/red]")
+            raise typer.Exit(1)
+        get_console().print(f"  [green]✓ {stage.name}: {result.message}[/green]")
 
-        get_console().rule("Step 4: Update source README")
-        setup_pages(root, org, repo, store_base_url=url, available_artefacts=set(found))
-
-        get_console().rule("Step 5: Commit and push source")
-        git_commit_and_push(root, "docs: update artefact links", remote, outputs=["README.md"])
-
-        if not skip_verify:
-            get_console().rule("Step 6: Verify deployment")
-            artefact_urls = {kind: url + path.name for kind, path in found.items()}
-            verify_pages(url, max_wait=verify_timeout, artefact_urls=artefact_urls)
-    else:
-        # Local mode: existing behaviour
-        get_console().rule("Step 3: Setup GitHub Pages")
-        url = setup_pages(root, org, repo)
-
-        get_console().rule("Step 4: Commit and push")
-        git_commit_and_push(
-            root, "feat: publish NotebookLM artefacts with GitHub Pages player", remote
-        )
-
-        if not skip_verify:
-            get_console().rule("Step 5: Verify deployment")
-            verify_pages(url, max_wait=verify_timeout)
-
-    get_console().print(f"\n[bold green]✅ Published![/bold green] {url}")
+    get_console().print("\n[bold green]✅ Published![/bold green]")
 
 
 
@@ -800,6 +806,11 @@ def pipeline(
         "--force-regen",
         help="Force regeneration of all artefacts.",
     ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Show what each stage would do without executing.",
+    ),
     timeout: int = typer.Option(
         900,
         "--timeout",
@@ -816,6 +827,7 @@ def pipeline(
         repo-artefacts pipeline /path/to/repo --store Org/store
         repo-artefacts pipeline /path/to/repo --store Org/store --resume
         repo-artefacts pipeline /path/to/repo --store Org/store --force-regen
+        repo-artefacts pipeline /path/to/repo --store Org/store --dry-run
     """
     from repo_artefacts.config import load_config
     from repo_artefacts.pipeline import run_pipeline
@@ -833,6 +845,7 @@ def pipeline(
         store_slug=store_slug or None,
         keep_notebook=keep_notebook,
         force_regen=force_regen,
+        dry_run=dry_run,
         resume=resume,
         timeout=timeout,
     )
