@@ -28,7 +28,6 @@ REAUTH_BACKOFF = [2, 10, 30]  # seconds between re-auth retries
 RATE_LIMIT_BACKOFF = [30, 60, 300]  # escalating backoff for rate limits
 
 
-
 # ---------------------------------------------------------------------------
 # Type mapping — uses upstream notebooklm-py public ArtifactType (string enum)
 # to stay in sync automatically.  No integer type codes.
@@ -267,8 +266,6 @@ async def get_completed_artefacts(notebook_id: str) -> set[str]:
             if name:
                 result.add(name)
     return result
-
-
 
 
 # ---------------------------------------------------------------------------

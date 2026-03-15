@@ -370,8 +370,6 @@ def publish(
     get_console().print("\n[bold green]✅ Published![/bold green]")
 
 
-
-
 @app.command()
 @_handle_errors
 def migrate(

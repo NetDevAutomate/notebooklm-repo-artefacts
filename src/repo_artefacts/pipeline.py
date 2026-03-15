@@ -598,22 +598,22 @@ def _resolve_repo_name(repo_path: Path) -> str:
 
 def _notify(title: str, message: str) -> None:
     """Send a macOS notification. Silent no-op on other platforms."""
+    import contextlib
     import platform
     import subprocess as sp
 
     if platform.system() != "Darwin":
         return
-    try:
+    with contextlib.suppress(Exception):
         sp.run(
             [
-                "osascript", "-e",
+                "osascript",
+                "-e",
                 f'display notification "{message}" with title "{title}"',
             ],
             capture_output=True,
             timeout=5,
         )
-    except Exception:
-        pass  # best-effort
 
 
 def run_pipeline(
@@ -716,14 +716,18 @@ def run_pipeline(
 
         # Metrics: track stage duration
         stage_duration = round(time.monotonic() - stage_start, 1)
-        console.print(f"  [green]✓ {stage.name}: {result.message}[/green] [dim]({stage_duration}s)[/dim]")
+        console.print(
+            f"  [green]✓ {stage.name}: {result.message}[/green] [dim]({stage_duration}s)[/dim]"
+        )
         ctx.state.set_stage(stage.name, "pass", duration_s=stage_duration, **result.data)
         ctx.save_state()
 
     total_duration = round(time.monotonic() - pipeline_start, 1)
 
     if all_passed:
-        console.print(f"\n[bold green]Pipeline complete![/bold green] [dim]({total_duration}s)[/dim]")
+        console.print(
+            f"\n[bold green]Pipeline complete![/bold green] [dim]({total_duration}s)[/dim]"
+        )
         _notify("repo-artefacts", f"Pipeline complete for {repo_name} ({total_duration}s)")
     else:
         console.print(f"\n[bold red]Pipeline failed.[/bold red] [dim]({total_duration}s)[/dim]")
