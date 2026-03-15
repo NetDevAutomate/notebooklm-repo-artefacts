@@ -279,14 +279,14 @@ class GenerateStage:
 
                     # Request generation
                     try:
-                        status = await _with_reauth(
+                        gen_status = await _with_reauth(
                             client,
-                            lambda a=artefact: _do_generate(client, nb_id, a),
+                            lambda a=artefact: _request_artefact(client, nb_id, a),
                             f"generate {artefact}",
                         )
-                        if status.is_failed or not status.task_id:
+                        if gen_status.is_failed or not gen_status.task_id:
                             get_console().print(
-                                f"  [red]Failed to start {artefact}: {status.error}[/red]"
+                                f"  [red]Failed to start {artefact}: {gen_status.error}[/red]"
                             )
                             failed.append(artefact)
                             ctx.state.artefacts[artefact] = "failed"
@@ -297,44 +297,47 @@ class GenerateStage:
                         ctx.state.artefacts[artefact] = "failed"
                         continue
 
-                    # Poll for completion
+                    # Wait for completion using upstream exponential-backoff poller
                     start = time.monotonic()
-                    deadline = start + ctx.timeout
-                    while time.monotonic() < deadline:
-                        await asyncio.sleep(30)
-                        elapsed = int(time.monotonic() - start)
-                        artifacts = await _with_reauth(
-                            client, lambda: client.artifacts.list(nb_id), f"poll {artefact}"
+                    try:
+                        final_status = await _with_reauth(
+                            client,
+                            lambda tid=gen_status.task_id: client.artifacts.wait_for_completion(
+                                nb_id,
+                                tid,
+                                initial_interval=2.0,
+                                max_interval=10.0,
+                                timeout=float(ctx.timeout),
+                            ),
+                            f"wait {artefact}",
                         )
-                        for art in artifacts:
-                            if art.kind == target_kind:
-                                if art.is_completed:
-                                    get_console().print(
-                                        f"  [green]✓ {artefact} ready ({elapsed}s)[/green]"
-                                    )
-                                    completed.append(artefact)
-                                    ctx.state.artefacts[artefact] = "completed"
-                                    break
-                                if art.is_failed:
-                                    get_console().print(
-                                        f"  [red]✗ {artefact} failed ({elapsed}s)[/red]"
-                                    )
-                                    failed.append(artefact)
-                                    ctx.state.artefacts[artefact] = "failed"
-                                    break
-                        else:
+                        elapsed = int(time.monotonic() - start)
+                        if final_status.is_complete:
                             get_console().print(
-                                f"  [dim]  … {artefact} still generating ({elapsed}s)[/dim]"
+                                f"  [green]✓ {artefact} ready ({elapsed}s)[/green]"
                             )
-                            continue
-                        break  # inner for found a terminal state
-                    else:
-                        get_console().print(f"  [red]✗ {artefact} timed out[/red]")
+                            completed.append(artefact)
+                            ctx.state.artefacts[artefact] = "completed"
+                        elif final_status.is_failed:
+                            get_console().print(
+                                f"  [red]✗ {artefact} failed ({elapsed}s): "
+                                f"{final_status.error}[/red]"
+                            )
+                            failed.append(artefact)
+                            ctx.state.artefacts[artefact] = "failed"
+                        else:
+                            # Unexpected terminal state — treat as failure
+                            get_console().print(
+                                f"  [red]✗ {artefact} ended with status "
+                                f"'{final_status.status}' ({elapsed}s)[/red]"
+                            )
+                            failed.append(artefact)
+                            ctx.state.artefacts[artefact] = "failed"
+                    except TimeoutError:
+                        elapsed = int(time.monotonic() - start)
+                        get_console().print(f"  [red]✗ {artefact} timed out ({elapsed}s)[/red]")
                         failed.append(artefact)
                         ctx.state.artefacts[artefact] = "timed_out"
-
-        async def _do_generate(client: NotebookLMClient, nb_id: str, artefact: str):
-            return await _request_artefact(client, nb_id, artefact)
 
         asyncio.run(_generate_all())
 
