@@ -1031,3 +1031,68 @@ def clean(
         get_console().print("  [green]✓[/green] Pushed cleanup to store")
     except subprocess.CalledProcessError as e:
         get_console().print(f"  [red]✗[/red] Push failed: {e}")
+
+
+@app.command()
+@_handle_errors
+def pipeline2(
+    repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
+    store: str | None = typer.Option(
+        None,
+        "--store",
+        "-s",
+        help="Publish to external artefact store (org/repo). Uses config default if set.",
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="Resume from previous pipeline state.",
+    ),
+    keep_notebook: bool = typer.Option(
+        False,
+        "--keep-notebook",
+        help="Don't delete the notebook after publishing.",
+    ),
+    force_regen: bool = typer.Option(
+        False,
+        "--force-regen",
+        help="Force regeneration of all artefacts.",
+    ),
+    timeout: int = typer.Option(
+        900,
+        "--timeout",
+        "-t",
+        help="Generation timeout per artefact (seconds).",
+    ),
+) -> None:
+    """Stage-based pipeline: collect → upload → generate → download → publish → verify.
+
+    Idempotent by default — only generates missing artefacts. Each stage has
+    pre/post validation gates. State persisted to JSON for resumability.
+
+    Examples:
+        repo-artefacts pipeline2 /path/to/repo --store Org/store
+        repo-artefacts pipeline2 /path/to/repo --store Org/store --resume
+        repo-artefacts pipeline2 /path/to/repo --store Org/store --force-regen
+    """
+    from repo_artefacts.config import load_config
+    from repo_artefacts.pipeline import run_pipeline
+
+    root = repo_path.resolve()
+    cfg = load_config()
+    store_slug = store or cfg.default_store
+    if not store_slug:
+        get_console().print(
+            "[yellow]No store configured. Use --store or set default_store.[/yellow]"
+        )
+
+    success = run_pipeline(
+        root,
+        store_slug=store_slug or None,
+        keep_notebook=keep_notebook,
+        force_regen=force_regen,
+        resume=resume,
+        timeout=timeout,
+    )
+    if not success:
+        raise typer.Exit(1)
