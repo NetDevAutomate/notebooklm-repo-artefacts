@@ -49,7 +49,8 @@ def test_artefact_status_values() -> None:
 
 def test_artefact_type_values() -> None:
     assert ArtefactType.AUDIO == 1
-    assert ArtefactType.VIDEO == 8
+    assert ArtefactType.VIDEO == 3
+    assert ArtefactType.SLIDES == 8
 
 
 def test_name_to_type_covers_config() -> None:
@@ -128,7 +129,7 @@ async def test_snapshot_artefact_ids() -> None:
     client.artifacts._list_raw = AsyncMock(
         return_value=[
             ["id-1", None, 1, None, 3],  # audio, completed
-            ["id-2", None, 8, None, 4],  # video, failed
+            ["id-2", None, 3, None, 4],  # video, failed
         ]
     )
     result = await _snapshot_artefact_ids(client, "nb-1")

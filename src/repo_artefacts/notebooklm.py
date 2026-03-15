@@ -51,9 +51,9 @@ class ArtefactType(IntEnum):
     """Type codes from the NotebookLM _list_raw API."""
 
     AUDIO = 1
-    SLIDES = 3
+    VIDEO = 3
     INFOGRAPHIC = 7
-    VIDEO = 8
+    SLIDES = 8
 
 
 # Mapping from artefact name to ArtefactType
