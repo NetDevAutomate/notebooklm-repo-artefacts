@@ -670,6 +670,6 @@ def run_pipeline(
     else:
         console.print("\n[bold red]Pipeline failed.[/bold red]")
         console.print(f"State saved to: {state_path}")
-        console.print("Resume with: repo-artefacts pipeline2 --resume ...")
+        console.print("Resume with: repo-artefacts pipeline --resume ...")
 
     return all_passed

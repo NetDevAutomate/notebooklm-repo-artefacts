@@ -364,9 +364,9 @@ def publish(
     get_console().print(f"\n[bold green]✅ Published![/bold green] {url}")
 
 
-@app.command()
+@app.command(deprecated=True, hidden=True)
 @_handle_errors
-def pipeline(
+def pipeline_legacy(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
     notebook_id: str | None = typer.Option(
         None,
@@ -1035,7 +1035,7 @@ def clean(
 
 @app.command()
 @_handle_errors
-def pipeline2(
+def pipeline(
     repo_path: Path = typer.Argument(Path("."), help="Path to git repository."),
     store: str | None = typer.Option(
         None,
@@ -1071,9 +1071,9 @@ def pipeline2(
     pre/post validation gates. State persisted to JSON for resumability.
 
     Examples:
-        repo-artefacts pipeline2 /path/to/repo --store Org/store
-        repo-artefacts pipeline2 /path/to/repo --store Org/store --resume
-        repo-artefacts pipeline2 /path/to/repo --store Org/store --force-regen
+        repo-artefacts pipeline /path/to/repo --store Org/store
+        repo-artefacts pipeline /path/to/repo --store Org/store --resume
+        repo-artefacts pipeline /path/to/repo --store Org/store --force-regen
     """
     from repo_artefacts.config import load_config
     from repo_artefacts.pipeline import run_pipeline

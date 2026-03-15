@@ -1,20 +1,20 @@
 # Pipeline Architecture
 
-> The `pipeline2` command: from git repo to hosted artefacts in one shot, with stage validation gates and idempotent behaviour.
+> The `pipeline` command: from git repo to hosted artefacts in one shot, with stage validation gates and idempotent behaviour.
 
 ## Overview
 
-`repo-artefacts pipeline2` is the stage-based pipeline that chains every step — collect, upload, generate, download, publish, verify, readme update, and cleanup — into a single invocation. Each stage has pre-check and post-check validation gates. State is persisted to JSON after each stage for resumability.
+`repo-artefacts pipeline` is the stage-based pipeline that chains every step — collect, upload, generate, download, publish, verify, readme update, and cleanup — into a single invocation. Each stage has pre-check and post-check validation gates. State is persisted to JSON after each stage for resumability.
 
 ```bash
-repo-artefacts pipeline2 /path/to/repo --store Org/artefact-store
+repo-artefacts pipeline /path/to/repo --store Org/artefact-store
 ```
 
 ## Stage Flow with Validation Gates
 
 ```mermaid
 flowchart TD
-    START([pipeline2 /path/to/repo]) --> C
+    START([pipeline /path/to/repo]) --> C
 
     subgraph COLLECT["Stage 1: Collect"]
         C_PRE{{"PRE: repo exists?\nis git repo?"}}
@@ -122,13 +122,13 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     actor User
-    participant CLI as pipeline2
+    participant CLI as pipeline
     participant Col as collector
     participant NLM as NotebookLM API
     participant Store as Artefact Store
     participant GH as GitHub
 
-    User->>CLI: pipeline2 /path/to/repo --store Org/store
+    User->>CLI: pipeline /path/to/repo --store Org/store
 
     rect rgb(30, 40, 60)
     Note over CLI,Col: Stage 1: Collect
@@ -237,7 +237,7 @@ After each stage, the pipeline saves state to `.pipeline-state.json` in the arte
 Resume a failed pipeline:
 
 ```bash
-repo-artefacts pipeline2 /path/to/repo --store Org/store --resume
+repo-artefacts pipeline /path/to/repo --store Org/store --resume
 ```
 
 ## Options
@@ -261,7 +261,7 @@ repo-artefacts pipeline2 /path/to/repo --store Org/store --resume
 
 ## Legacy Pipeline
 
-The original `pipeline` command is still available for backwards compatibility. It is a monolithic function without stage validation gates. New usage should prefer `pipeline2`.
+The original monolithic pipeline is available as `pipeline-legacy` (hidden, deprecated). It lacks stage validation gates and is retained only for backwards compatibility. All new usage should use `pipeline`.
 
 ## Artefact Store Mode
 
