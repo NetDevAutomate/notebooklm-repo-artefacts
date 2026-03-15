@@ -42,15 +42,18 @@ class FakeStatus:
 
 
 def test_artefact_status_values() -> None:
+    """Verify our aliases resolve to the upstream notebooklm-py status codes."""
     assert ArtefactStatus.COMPLETED == 3
     assert ArtefactStatus.FAILED == 4
-    assert ArtefactStatus(3) is ArtefactStatus.COMPLETED
+    assert ArtefactStatus.PROCESSING == 1
+    assert ArtefactStatus.PENDING == 2
 
 
 def test_artefact_type_values() -> None:
+    """Verify our aliases resolve to the upstream notebooklm-py type codes."""
     assert ArtefactType.AUDIO == 1
     assert ArtefactType.VIDEO == 3
-    assert ArtefactType.SLIDES == 8
+    assert ArtefactType.SLIDE_DECK == 8
 
 
 def test_name_to_type_covers_config() -> None:

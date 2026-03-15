@@ -6,7 +6,6 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from enum import IntEnum
 from pathlib import Path
 from typing import NamedTuple, TypeVar
 
@@ -17,6 +16,12 @@ from notebooklm import (
     InfographicOrientation,
     NotebookLMClient,
     VideoStyle,
+)
+from notebooklm._artifacts import (
+    ArtifactStatus as ArtefactStatus,
+)
+from notebooklm._artifacts import (
+    ArtifactTypeCode as ArtefactType,
 )
 from notebooklm.exceptions import AuthError, RateLimitError, RPCError
 from rich.table import Table
@@ -34,30 +39,21 @@ QUOTA_ERROR_PATTERNS = ["rate limit", "quota exceeded", "quota"]
 
 
 # ---------------------------------------------------------------------------
-# Type definitions for NotebookLM API data
+# Type/status codes — imported from upstream notebooklm-py to stay in sync.
+# Local aliases keep existing call-sites working.
 # ---------------------------------------------------------------------------
 
+# Mapping from our config keys to upstream type codes.
+# Keys must match ARTEFACT_CONFIG (audio, video, slides, infographic).
+NAME_TO_TYPE: dict[str, ArtefactType] = {
+    "audio": ArtefactType.AUDIO,
+    "video": ArtefactType.VIDEO,
+    "slides": ArtefactType.SLIDE_DECK,
+    "infographic": ArtefactType.INFOGRAPHIC,
+}
 
-class ArtefactStatus(IntEnum):
-    """Status codes from the NotebookLM _list_raw API."""
-
-    QUEUED = 1
-    IN_PROGRESS = 2
-    COMPLETED = 3
-    FAILED = 4
-
-
-class ArtefactType(IntEnum):
-    """Type codes from the NotebookLM _list_raw API."""
-
-    AUDIO = 1
-    VIDEO = 3
-    INFOGRAPHIC = 7
-    SLIDES = 8
-
-
-# Mapping from artefact name to ArtefactType
-NAME_TO_TYPE: dict[str, ArtefactType] = {t.name.lower(): t for t in ArtefactType}
+# Reverse: upstream type code → our config key name
+TYPE_TO_NAME: dict[ArtefactType, str] = {v: k for k, v in NAME_TO_TYPE.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +89,7 @@ class RawArtefact:
     @property
     def type_name(self) -> str:
         """Lowercase name matching ARTEFACT_CONFIG keys."""
-        return self.type_code.name.lower()
+        return TYPE_TO_NAME.get(self.type_code, self.type_code.name.lower())
 
 
 def _parse_raw_artefacts(raw: list) -> list[RawArtefact]:
@@ -416,7 +412,7 @@ async def _poll_by_type(
                 return "completed"
             if art.is_failed:
                 return "failed"
-            if art.status in (ArtefactStatus.QUEUED, ArtefactStatus.IN_PROGRESS):
+            if art.status in (ArtefactStatus.PROCESSING, ArtefactStatus.PENDING):
                 return "in_progress"
     return "in_progress"
 
