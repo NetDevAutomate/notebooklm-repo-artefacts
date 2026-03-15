@@ -186,6 +186,22 @@ class UploadStage:
     def pre_check(self, ctx: PipelineContext) -> StageResult:
         if not ctx.pdf_path or not ctx.pdf_path.exists():
             return StageResult(Status.FAIL, "No PDF to upload")
+
+        # Content hash skip: if the PDF we just collected has the same hash
+        # as what was previously uploaded (stored in state), skip the upload.
+        # This only triggers on --resume where state carries the previous hash.
+        prev_hash = ctx.state.stages.get("upload", {}).get("content_hash", "")
+        if (
+            not ctx.force_regen
+            and prev_hash
+            and ctx.state.notebook_id
+            and ctx.state.content_hash == prev_hash
+        ):
+            get_console().print(
+                f"  [dim]Content unchanged (hash {prev_hash[:12]}…) — skipping upload[/dim]"
+            )
+            return StageResult(Status.SKIP, "Content hash unchanged")
+
         return StageResult(Status.PASS)
 
     def execute(self, ctx: PipelineContext) -> StageResult:
@@ -204,7 +220,11 @@ class UploadStage:
         return StageResult(
             Status.PASS,
             f"Notebook: {ctx.state.notebook_id}",
-            {"notebook_id": ctx.state.notebook_id, "source_replaced": ctx.state.source_replaced},
+            {
+                "notebook_id": ctx.state.notebook_id,
+                "source_replaced": ctx.state.source_replaced,
+                "content_hash": ctx.state.content_hash,
+            },
         )
 
     def post_check(self, ctx: PipelineContext) -> StageResult:

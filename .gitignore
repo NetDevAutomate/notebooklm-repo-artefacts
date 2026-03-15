@@ -70,3 +70,6 @@ CLAUDE.md
 
 # Plans (local only)
 docs/plans/
+
+# Pipeline state (ephemeral, resumable)
+.pipeline-state.json
