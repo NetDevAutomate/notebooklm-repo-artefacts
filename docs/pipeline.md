@@ -259,10 +259,6 @@ repo-artefacts pipeline /path/to/repo --store Org/store --resume
 4. **Source ingestion wait** — `add_file(wait=True)` blocks until NotebookLM finishes ingesting the source PDF before generation starts.
 5. **Never deletes completed artefacts** — Only failed artefacts are cleaned up before regeneration. Completed artefacts are preserved unless `--force-regen` is explicitly set.
 
-## Legacy Pipeline
-
-The original monolithic pipeline is available as `pipeline-legacy` (hidden, deprecated). It lacks stage validation gates and is retained only for backwards compatibility. All new usage should use `pipeline`.
-
 ## Artefact Store Mode
 
 With `--store` (or a `default_store` in `~/.config/repo-artefacts/config.toml`), the pipeline publishes artefacts to a separate GitHub repo instead of committing binary files into the source repo:
