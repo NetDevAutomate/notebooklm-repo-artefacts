@@ -20,10 +20,48 @@ class StoreError(RepoArtefactsError):
     """Error during artefact store operations."""
 
 
+def _validate_store_slug(store_slug: str) -> None:
+    """Reject store slugs that could resolve to dangerous paths.
+
+    A valid slug looks like ``Org/repo`` — never an absolute path, never
+    containing ``..``, and never empty.  Getting this wrong is catastrophic:
+    ``Path(base) / "/absolute"`` silently discards the base in Python, so an
+    absolute path passed as a slug would make the cache dir point at the
+    real filesystem location — and ``shutil.rmtree`` would delete it.
+    """
+    if not store_slug or not store_slug.strip():
+        raise StoreError("Store slug must not be empty")
+    if store_slug.startswith(("/", "~")):
+        raise StoreError(f"Store slug must be an org/repo identifier, not a path: {store_slug}")
+    if ".." in store_slug.split("/"):
+        raise StoreError(f"Store slug must not contain '..': {store_slug}")
+    parts = store_slug.strip("/").split("/")
+    if len(parts) != 2 or not all(parts):
+        raise StoreError(f"Store slug must be in 'org/repo' format, got: {store_slug}")
+
+
 def _store_cache_dir(store_slug: str) -> Path:
     """Return cache directory for a store, e.g. ~/.cache/repo-artefacts/stores/Org/repo."""
+    _validate_store_slug(store_slug)
     cfg = load_config()
     return cfg.store_cache_dir / store_slug
+
+
+def _safe_rmtree(path: Path) -> None:
+    """Remove a directory only if it lives inside the expected cache tree.
+
+    Defense-in-depth: even if ``_validate_store_slug`` is bypassed or the
+    cache dir config changes, never delete a directory outside the cache.
+    """
+    cfg = load_config()
+    try:
+        path.resolve().relative_to(cfg.store_cache_dir.resolve())
+    except ValueError:
+        raise StoreError(
+            f"Refusing to delete {path} — it is outside the store cache "
+            f"directory ({cfg.store_cache_dir})"
+        ) from None
+    shutil.rmtree(path)
 
 
 def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path:
@@ -50,7 +88,7 @@ def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path:
             get_console().print(
                 f"[yellow]Pull failed, re-cloning: {result.stderr.strip()}[/yellow]"
             )
-            shutil.rmtree(cache_dir)
+            _safe_rmtree(cache_dir)
         else:
             return cache_dir
 
