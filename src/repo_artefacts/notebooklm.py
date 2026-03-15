@@ -10,18 +10,14 @@ from pathlib import Path
 from typing import NamedTuple, TypeVar
 
 from notebooklm import (
+    Artifact,
+    ArtifactType,
     AudioFormat,
     GenerationStatus,
     InfographicDetail,
     InfographicOrientation,
     NotebookLMClient,
     VideoStyle,
-)
-from notebooklm._artifacts import (
-    ArtifactStatus as ArtefactStatus,
-)
-from notebooklm._artifacts import (
-    ArtifactTypeCode as ArtefactType,
 )
 from notebooklm.exceptions import AuthError, RateLimitError, RPCError
 from rich.table import Table
@@ -39,67 +35,26 @@ QUOTA_ERROR_PATTERNS = ["rate limit", "quota exceeded", "quota"]
 
 
 # ---------------------------------------------------------------------------
-# Type/status codes — imported from upstream notebooklm-py to stay in sync.
-# Local aliases keep existing call-sites working.
+# Type mapping — uses upstream notebooklm-py public ArtifactType (string enum)
+# to stay in sync automatically.  No integer type codes.
 # ---------------------------------------------------------------------------
 
-# Mapping from our config keys to upstream type codes.
+# Our config keys → upstream ArtifactType string enum.
 # Keys must match ARTEFACT_CONFIG (audio, video, slides, infographic).
-NAME_TO_TYPE: dict[str, ArtefactType] = {
-    "audio": ArtefactType.AUDIO,
-    "video": ArtefactType.VIDEO,
-    "slides": ArtefactType.SLIDE_DECK,
-    "infographic": ArtefactType.INFOGRAPHIC,
+NAME_TO_KIND: dict[str, ArtifactType] = {
+    "audio": ArtifactType.AUDIO,
+    "video": ArtifactType.VIDEO,
+    "slides": ArtifactType.SLIDE_DECK,
+    "infographic": ArtifactType.INFOGRAPHIC,
 }
 
-# Reverse: upstream type code → our config key name
-TYPE_TO_NAME: dict[ArtefactType, str] = {v: k for k, v in NAME_TO_TYPE.items()}
+# Reverse: upstream ArtifactType → our config key name.
+KIND_TO_NAME: dict[ArtifactType, str] = {v: k for k, v in NAME_TO_KIND.items()}
 
 
-@dataclass(frozen=True, slots=True)
-class RawArtefact:
-    """Parsed representation of a single _list_raw entry."""
-
-    id: str
-    type_code: ArtefactType
-    status: ArtefactStatus
-
-    @classmethod
-    def from_raw(cls, arr: list) -> RawArtefact | None:
-        """Parse a raw API array. Returns None if too short or unknown codes."""
-        if len(arr) <= 4:
-            return None
-        try:
-            return cls(
-                id=str(arr[0]),
-                type_code=ArtefactType(arr[2]),
-                status=ArtefactStatus(arr[4]),
-            )
-        except ValueError:
-            return None
-
-    @property
-    def is_completed(self) -> bool:
-        return self.status == ArtefactStatus.COMPLETED
-
-    @property
-    def is_failed(self) -> bool:
-        return self.status == ArtefactStatus.FAILED
-
-    @property
-    def type_name(self) -> str:
-        """Lowercase name matching ARTEFACT_CONFIG keys."""
-        return TYPE_TO_NAME.get(self.type_code, self.type_code.name.lower())
-
-
-def _parse_raw_artefacts(raw: list) -> list[RawArtefact]:
-    """Parse all raw arrays, skipping entries that are too short or unknown."""
-    results = []
-    for arr in raw:
-        art = RawArtefact.from_raw(arr)
-        if art is not None:
-            results.append(art)
-    return results
+def _artifact_config_name(art: Artifact) -> str | None:
+    """Map an upstream Artifact to our config key name, or None if unrecognised."""
+    return KIND_TO_NAME.get(art.kind)
 
 
 class DownloadSpec(NamedTuple):
@@ -333,25 +288,17 @@ async def _delete_existing_by_type(
             If False, delete ALL artefacts of this type including completed
             (used when explicitly requesting regeneration).
     """
-    artefact_type = NAME_TO_TYPE[artefact]
-    raw = await _with_reauth(
-        client, lambda: client.artifacts._list_raw(notebook_id), f"list {artefact}"
+    target_kind = NAME_TO_KIND[artefact]
+    artifacts = await _with_reauth(
+        client, lambda: client.artifacts.list(notebook_id), f"list {artefact}"
     )
-    parsed = _parse_raw_artefacts(raw)
-
-    # Log what we see for debugging when entries are skipped
-    if not parsed and raw:
-        get_console().print(
-            f"  [dim]⚠ {artefact}: {len(raw)} raw entries but none parseable"
-            f" (first entry has {len(raw[0]) if raw[0] else 0} elements)[/dim]"
-        )
-    for art in parsed:
-        if art.type_code != artefact_type:
+    for art in artifacts:
+        if art.kind != target_kind:
             continue
         should_delete = art.is_failed or not failed_only
         if should_delete:
             get_console().print(
-                f"  [dim]Deleting {art.status.name.lower()} {artefact} ({art.id[:12]}...)[/dim]"
+                f"  [dim]Deleting {art.status_str} {artefact} ({art.id[:12]}...)[/dim]"
             )
             await _with_reauth(
                 client,
@@ -361,33 +308,40 @@ async def _delete_existing_by_type(
         else:
             get_console().print(
                 f"  [dim]{artefact}: found existing with status"
-                f" {art.status.name} ({art.id[:12]}...)[/dim]"
+                f" {art.status_str} ({art.id[:12]}...)[/dim]"
             )
 
 
 async def _snapshot_artefact_ids(
     client: NotebookLMClient, notebook_id: str
 ) -> dict[str, set[str]]:
-    """Snapshot existing artefact IDs by type name."""
-    raw = await _with_reauth(
-        client, lambda: client.artifacts._list_raw(notebook_id), "snapshot artefacts"
+    """Snapshot existing artefact IDs by config key name."""
+    artifacts = await _with_reauth(
+        client, lambda: client.artifacts.list(notebook_id), "snapshot artefacts"
     )
     result: dict[str, set[str]] = {name: set() for name in ARTEFACT_CONFIG}
-    for art in _parse_raw_artefacts(raw):
-        if art.type_name in result:
-            result[art.type_name].add(art.id)
+    for art in artifacts:
+        name = _artifact_config_name(art)
+        if name and name in result:
+            result[name].add(art.id)
     return result
 
 
 async def get_completed_artefacts(notebook_id: str) -> set[str]:
-    """Return set of artefact type names that are already completed in the notebook."""
+    """Return set of our config key names for completed artefacts in the notebook."""
     async with await NotebookLMClient.from_storage() as client:
-        raw = await _with_reauth(
+        artifacts = await _with_reauth(
             client,
-            lambda: client.artifacts._list_raw(notebook_id),
+            lambda: client.artifacts.list(notebook_id),
             "check completed",
         )
-    return {art.type_name for art in _parse_raw_artefacts(raw) if art.is_completed}
+    result: set[str] = set()
+    for art in artifacts:
+        if art.is_completed:
+            name = _artifact_config_name(art)
+            if name:
+                result.add(name)
+    return result
 
 
 async def _poll_by_type(
@@ -397,22 +351,19 @@ async def _poll_by_type(
     known_ids: set[str],
 ) -> str:
     """Find a new or changed artefact of the given type. Returns status string."""
-    artefact_type = NAME_TO_TYPE[artefact]
-    raw = await _with_reauth(
-        client, lambda: client.artifacts._list_raw(notebook_id), f"poll {artefact}"
+    target_kind = NAME_TO_KIND[artefact]
+    artifacts = await _with_reauth(
+        client, lambda: client.artifacts.list(notebook_id), f"poll {artefact}"
     )
-    for art in _parse_raw_artefacts(raw):
-        if art.type_code != artefact_type:
+    for art in artifacts:
+        if art.kind != target_kind:
             continue
-        if art.id not in known_ids or art.status in (
-            ArtefactStatus.COMPLETED,
-            ArtefactStatus.FAILED,
-        ):
+        if art.id not in known_ids or art.is_completed or art.is_failed:
             if art.is_completed:
                 return "completed"
             if art.is_failed:
                 return "failed"
-            if art.status in (ArtefactStatus.PROCESSING, ArtefactStatus.PENDING):
+            if art.is_processing or art.is_pending:
                 return "in_progress"
     return "in_progress"
 
