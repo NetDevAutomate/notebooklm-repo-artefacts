@@ -668,6 +668,12 @@ def run_pipeline(
         console.rule(f"Stage: {stage.name}")
         stage_start = time.monotonic()
 
+        # Dry run: skip pre-checks (previous stages didn't execute) and show plan
+        if dry_run:
+            console.print(f"  [dim]Would execute: {stage.name}[/dim]")
+            ctx.state.set_stage(stage.name, "dry_run")
+            continue
+
         # Pre-check
         pre = stage.pre_check(ctx)
         if pre.status == Status.SKIP:
@@ -681,13 +687,6 @@ def run_pipeline(
             ctx.save_state()
             all_passed = False
             break
-
-        # Dry run: show what would happen, don't execute
-        if dry_run:
-            console.print(f"  [dim]Would execute: {stage.name}[/dim]")
-            ctx.state.set_stage(stage.name, "dry_run")
-            ctx.save_state()
-            continue
 
         # Execute
         try:
