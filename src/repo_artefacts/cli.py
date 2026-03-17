@@ -458,9 +458,9 @@ def migrate(
         else:
             # Some files may not be tracked (untracked artefacts)
             get_console().print(f"  [dim]git rm: {result.stderr.strip()}[/dim]")
-            # Force-remove any that are tracked
+            # Force-remove any that are tracked (--force needed for locally modified files)
             subprocess.run(
-                ["git", "rm", "--quiet", "--ignore-unmatch", "--", *files_to_remove],
+                ["git", "rm", "--force", "--quiet", "--ignore-unmatch", "--", *files_to_remove],
                 cwd=root,
                 capture_output=True,
             )

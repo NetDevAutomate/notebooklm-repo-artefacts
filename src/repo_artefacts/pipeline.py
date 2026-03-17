@@ -279,6 +279,7 @@ class GenerateStage:
                             f"  [dim]Waiting {self.gap_seconds}s before next generation...[/dim]"
                         )
                         await asyncio.sleep(self.gap_seconds)
+                        await client.refresh_auth()
 
                     get_console().print(f"  [blue]Generating {artefact}...[/blue]")
 
@@ -318,44 +319,62 @@ class GenerateStage:
                         ctx.state.artefacts[artefact] = "failed"
                         continue
 
-                    # Wait for completion using upstream exponential-backoff poller
+                    # Wait for completion with chunked polling + auth refresh.
+                    # Auth tokens expire after ~15 min, so we poll in 5-min
+                    # chunks with a refresh between each to prevent silent
+                    # auth failures inside the upstream poller.
+                    chunk_timeout = 300.0  # 5 min per chunk
+                    total_timeout = float(ctx.timeout)
                     start = time.monotonic()
-                    try:
-                        final_status = await _with_reauth(
-                            client,
-                            lambda tid=gen_status.task_id: client.artifacts.wait_for_completion(
-                                nb_id,
-                                tid,
-                                initial_interval=2.0,
-                                max_interval=10.0,
-                                timeout=float(ctx.timeout),
-                            ),
-                            f"wait {artefact}",
+                    final_status = None
+
+                    while time.monotonic() - start < total_timeout:
+                        remaining = total_timeout - (time.monotonic() - start)
+                        this_chunk = min(chunk_timeout, remaining)
+                        try:
+                            final_status = await _with_reauth(
+                                client,
+                                lambda tid=gen_status.task_id, t=this_chunk: (
+                                    client.artifacts.wait_for_completion(
+                                        nb_id,
+                                        tid,
+                                        initial_interval=2.0,
+                                        max_interval=10.0,
+                                        timeout=t,
+                                    )
+                                ),
+                                f"wait {artefact}",
+                            )
+                            break  # Returned normally — complete or failed
+                        except TimeoutError:
+                            elapsed = int(time.monotonic() - start)
+                            if time.monotonic() - start + chunk_timeout >= total_timeout:
+                                break  # True timeout — exit loop
+                            get_console().print(
+                                f"  [dim]… {artefact} still generating ({elapsed}s)"
+                                f" — refreshing auth[/dim]"
+                            )
+                            await client.refresh_auth()
+
+                    elapsed = int(time.monotonic() - start)
+                    if final_status is not None and final_status.is_complete:
+                        get_console().print(f"  [green]✓ {artefact} ready ({elapsed}s)[/green]")
+                        completed.append(artefact)
+                        ctx.state.artefacts[artefact] = "completed"
+                    elif final_status is not None and final_status.is_failed:
+                        get_console().print(
+                            f"  [red]✗ {artefact} failed ({elapsed}s): {final_status.error}[/red]"
                         )
-                        elapsed = int(time.monotonic() - start)
-                        if final_status.is_complete:
-                            get_console().print(
-                                f"  [green]✓ {artefact} ready ({elapsed}s)[/green]"
-                            )
-                            completed.append(artefact)
-                            ctx.state.artefacts[artefact] = "completed"
-                        elif final_status.is_failed:
-                            get_console().print(
-                                f"  [red]✗ {artefact} failed ({elapsed}s): "
-                                f"{final_status.error}[/red]"
-                            )
-                            failed.append(artefact)
-                            ctx.state.artefacts[artefact] = "failed"
-                        else:
-                            # Unexpected terminal state — treat as failure
-                            get_console().print(
-                                f"  [red]✗ {artefact} ended with status "
-                                f"'{final_status.status}' ({elapsed}s)[/red]"
-                            )
-                            failed.append(artefact)
-                            ctx.state.artefacts[artefact] = "failed"
-                    except TimeoutError:
-                        elapsed = int(time.monotonic() - start)
+                        failed.append(artefact)
+                        ctx.state.artefacts[artefact] = "failed"
+                    elif final_status is not None:
+                        get_console().print(
+                            f"  [red]✗ {artefact} ended with status "
+                            f"'{final_status.status}' ({elapsed}s)[/red]"
+                        )
+                        failed.append(artefact)
+                        ctx.state.artefacts[artefact] = "failed"
+                    else:
                         get_console().print(f"  [red]✗ {artefact} timed out ({elapsed}s)[/red]")
                         failed.append(artefact)
                         ctx.state.artefacts[artefact] = "timed_out"
