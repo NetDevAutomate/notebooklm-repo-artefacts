@@ -433,7 +433,7 @@ class TestPublishStage:
         ctx = _make_ctx(tmp_path, store_slug="/Users/someone/repo")
         result = PublishStage().pre_check(ctx)
         assert result.status == Status.FAIL
-        assert "not a path" in result.message
+        assert "must not be a path" in result.message
 
     def test_fail_with_tilde_path(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path, store_slug="~/code/repo")

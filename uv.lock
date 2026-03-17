@@ -394,16 +394,16 @@ wheels = [
 
 [[package]]
 name = "notebooklm-py"
-version = "0.3.3"
+version = "0.3.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "httpx" },
     { name = "rich" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/57/37/7ce4eed0ee707cf8b30902f3eed25d0bce1168ed8b3f84dc35d9d6bcba8a/notebooklm_py-0.3.3.tar.gz", hash = "sha256:dc2941b0ad50834393681f52f1d18ae87b1679fe188a63a3655544ee6c18c63a", size = 7959513, upload-time = "2026-03-03T19:18:21.25Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/89/0d/b6fc53016dcfc4305f89d157a29ed09bc471f65b9b83c2affe66694db7bb/notebooklm_py-0.3.4.tar.gz", hash = "sha256:dc72f89b1eb4c0efbad8641a0ec83da2e631c5a926e029a93a258b0032b503c4", size = 8007875, upload-time = "2026-03-12T03:03:57.969Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b2/e0/fc3b29ab0c537d6a1c7ea95467531e334ddecf81ad9d4c834f2c6dbf9d89/notebooklm_py-0.3.3-py3-none-any.whl", hash = "sha256:cb7356b00537858be180a095499947aaf184f88f817893852c9e861aeb8f477e", size = 160917, upload-time = "2026-03-03T19:18:19.258Z" },
+    { url = "https://files.pythonhosted.org/packages/31/1f/73b1bb084dddb3e9b6387db2779496d90c2c34dc4685f1f2c81f07880d0d/notebooklm_py-0.3.4-py3-none-any.whl", hash = "sha256:da54004f546d6409c01b474d18d031afc13a02254e2cb383dd6ee3e0974f5b47", size = 168780, upload-time = "2026-03-12T03:03:56.003Z" },
 ]
 
 [package.optional-dependencies]
@@ -443,7 +443,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "md2pdf-mermaid", specifier = ">=1.4" },
-    { name = "notebooklm-py", extras = ["browser"], specifier = ">=0.3,<0.4" },
+    { name = "notebooklm-py", extras = ["browser"], specifier = ">=0.3.4,<0.4" },
     { name = "rich", specifier = ">=13.0" },
     { name = "typer", specifier = ">=0.12" },
 ]

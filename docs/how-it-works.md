@@ -83,12 +83,14 @@ sequenceDiagram
     rect rgb(30, 40, 60)
     Note over CLI,NLM: Step 1 — Generate
     CLI->>NLM: Request audio, video, slides, infographic
-    loop Poll every 30s by artefact type
-        CLI->>NLM: Check status
+    loop Per artefact type
+        CLI->>NLM: Delete failed artefacts
+        CLI->>NLM: Generate (get task_id)
+        CLI->>NLM: wait_for_completion(task_id)
+        Note over CLI,NLM: Exponential backoff 2s→10s<br/>Media-readiness check
         alt Completed
             NLM-->>CLI: ✓ Ready
         else Failed
-            CLI->>NLM: Delete failed artefact
             CLI->>NLM: Retry (max 3 times)
         end
     end
@@ -114,23 +116,78 @@ sequenceDiagram
     CLI-->>User: ✅ Published! URL
 ```
 
+## Generation Flow (Detailed)
+
+The `generate_artefacts()` function in `notebooklm.py` handles the complex part:
+
+```mermaid
+graph TD
+    A[generate_artefacts] --> B[Check already completed]
+    B --> C[Filter to types needing generation]
+    C --> D{Any to generate?}
+    D -->|No| E[Return — all done]
+    D -->|Yes| F[For each type]
+    F --> G[Delete failed artefacts only]
+    G --> H[Request generation]
+    H --> I{Got task_id?}
+    I -->|Yes| J[Add to pending queue]
+    I -->|No| K{Quota error?}
+    K -->|Yes| L[Mark quota_exhausted]
+    K -->|No| M{Retries < 3?}
+    M -->|Yes| N[Backoff + auth refresh → retry]
+    M -->|No| O[Mark permanently failed]
+    N --> H
+
+    J --> P[wait_for_completion per artefact]
+    P --> Q{Result?}
+    Q -->|completed| R[Mark done]
+    Q -->|failed| M
+    Q -->|timed out| O
+    L --> S[Return GenerateResult]
+    R --> S
+    O --> S
+```
+
+### Key Improvements (v0.1.0+)
+
+| Before | After |
+|--------|-------|
+| Custom polling with 30s fixed interval | Upstream `wait_for_completion()` with 2s→10s exponential backoff |
+| Raw array parsing (`_list_raw`) | Public `client.artifacts.list()` with type filtering |
+| No media-readiness check | URL availability verified before reporting COMPLETED |
+| Deleted ALL artefacts before regenerating | Only deletes FAILED artefacts (preserves completed) |
+| Integer type codes (fragile) | `ArtifactType` str enum (stable) |
+
+### Media-Readiness Check
+
+This was a major source of flakiness. The NotebookLM API can report `status=COMPLETED` before the actual media URLs are populated in the response. The upstream library now checks URL availability at type-specific array positions:
+
+- **Audio**: `art[6][5]` — non-empty media list
+- **Video**: `art[8]` — any valid URL
+- **Infographic**: forward iteration through metadata
+- **Slide deck**: `art[16][3]` — PDF URL present
+
+If URLs aren't ready, the status is downgraded to `PROCESSING` and polling continues.
+
 ## Retry & Failure Handling
 
 ```mermaid
 graph TD
     A[Request generation] --> B{Immediate failure?}
-    B -->|No, got task| C[Add to poll queue]
-    B -->|Yes, empty task_id| D[Delete failed artefact]
-    D --> E{Retries < 3?}
-    E -->|Yes| A
-    E -->|No| F["✗ Give up on this type"]
+    B -->|No, got task_id| C[Add to pending queue]
+    B -->|Yes, no task_id| D{Quota error?}
+    D -->|Yes| E[Mark quota_exhausted — retry tomorrow]
+    D -->|No| F{Retries < 3?}
+    F -->|Yes| G[Backoff + auth refresh → retry]
+    F -->|No| H["✗ Permanently failed"]
+    G --> A
 
-    C --> G[Poll by artefact type]
-    G --> H{Status?}
-    H -->|completed| I["✓ Done"]
-    H -->|failed| D
-    H -->|in_progress| G
-    H -->|timeout| F
+    C --> I[wait_for_completion]
+    I --> J{Result?}
+    J -->|completed| K["✓ Done"]
+    J -->|failed| F
+    J -->|timed out| H
+    J -->|still in progress| I
 ```
 
 Key detail: NotebookLM won't generate a new artefact if a failed one of the same type exists. The tool deletes failed artefacts before every retry.
@@ -154,15 +211,18 @@ graph LR
 ## Quick Reference
 
 ```bash
-# Full pipeline
-repo-artefacts publish /path/to/repo -n $NOTEBOOK_ID
+# Full pipeline (stage-based with resumability)
+repo-artefacts pipeline /path/to/repo
+
+# With existing notebook
+repo-artefacts publish /path/to/repo -n NOTEBOOK_ID
 
 # Skip generation (artefacts already exist)
 repo-artefacts publish /path/to/repo --skip-generate
 
 # Individual steps
 repo-artefacts process /path/to/repo          # Collect + upload
-repo-artefacts generate -n $NOTEBOOK_ID       # Generate artefacts
-repo-artefacts download -n $NOTEBOOK_ID       # Download artefacts
+repo-artefacts generate -n NOTEBOOK_ID        # Generate artefacts
+repo-artefacts download -n NOTEBOOK_ID        # Download artefacts
 repo-artefacts pages /path/to/repo            # Player + Pages setup
 ```

@@ -6,6 +6,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from repo_artefacts.console import get_console
@@ -32,12 +34,38 @@ def check_artefacts(artefacts_dir: Path) -> dict[str, Path]:
     return found
 
 
+def _check_freshness(url: str, max_age_seconds: int = 600) -> tuple[bool, str]:
+    """Check if a URL's Last-Modified header is within max_age_seconds.
+
+    Returns (is_fresh, human-readable timestamp).
+    """
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        resp = urllib.request.urlopen(req)
+        last_modified = resp.headers.get("Last-Modified")
+        if last_modified:
+            modified_dt = parsedate_to_datetime(last_modified)
+            if modified_dt.tzinfo is None:
+                modified_dt = modified_dt.replace(tzinfo=UTC)
+            age = (datetime.now(UTC) - modified_dt).total_seconds()
+            ts = modified_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+            if age <= max_age_seconds:
+                return True, ts
+            return False, f"{ts} ({age:.0f}s ago — stale)"
+        return True, "no Last-Modified header (assumed fresh)"
+    except Exception as e:
+        return False, f"error checking: {e}"
+
+
 def verify_pages(
     url: str,
     max_wait: int = 120,
     artefact_urls: dict[str, str] | None = None,
 ) -> tuple[bool, set[str]]:
     """Poll the GitHub Pages URL until it returns 200 or timeout.
+
+    For each artefact, also checks the Last-Modified header to confirm
+    the file is fresh (not a stale cached copy).
 
     Returns (site_ok, verified_artefact_types).
     """
@@ -56,8 +84,20 @@ def verify_pages(
                             areq = urllib.request.Request(artefact_url, method="HEAD")
                             aresp = urllib.request.urlopen(areq)
                             if aresp.status == 200:
-                                get_console().print(f"  [green]✓[/green] {kind}: {artefact_url}")
-                                verified.add(kind)
+                                is_fresh, freshness_info = _check_freshness(artefact_url)
+                                if is_fresh:
+                                    get_console().print(
+                                        f"  [green]✓[/green] {kind}: {artefact_url}"
+                                        f" [dim](modified: {freshness_info})[/dim]"
+                                    )
+                                    verified.add(kind)
+                                else:
+                                    get_console().print(
+                                        f"  [yellow]⚠[/yellow] {kind}: {artefact_url}"
+                                        f" — stale: {freshness_info}"
+                                    )
+                                    # Still count as verified (file exists) but warn
+                                    verified.add(kind)
                             else:
                                 get_console().print(f"  [red]✗[/red] {kind}: HTTP {aresp.status}")
                         except (urllib.error.HTTPError, urllib.error.URLError) as e:

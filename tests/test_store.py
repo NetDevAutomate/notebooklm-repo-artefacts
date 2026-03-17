@@ -21,11 +21,11 @@ class TestValidateStoreSlug:
         _validate_store_slug("NetDevAutomate/artefact-store")
 
     def test_rejects_absolute_path(self):
-        with pytest.raises(StoreError, match="not a path"):
+        with pytest.raises(StoreError, match="must not be a path"):
             _validate_store_slug("/Users/someone/code/my-repo")
 
     def test_rejects_tilde_path(self):
-        with pytest.raises(StoreError, match="not a path"):
+        with pytest.raises(StoreError, match="must not be a path"):
             _validate_store_slug("~/code/my-repo")
 
     def test_rejects_dotdot(self):

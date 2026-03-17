@@ -8,20 +8,22 @@
 
 **Cause:** NotebookLM returns a `GenerationStatus` with `status="failed"` and empty `task_id` on immediate failure. If the code doesn't check the initial response, it never enters the polling loop for that artefact — but other artefacts keep polling, making it look stuck.
 
-**Fix (v0.1.0+):** The tool now checks the initial generation response for failures and queues retries immediately. Up to 3 retries per artefact.
+**Fix (v0.1.0+):** The tool now checks the initial generation response for failures and queues retries immediately. Up to 3 retries per artefact. Uses upstream `wait_for_completion()` with exponential backoff (2s→10s) and media-readiness checks.
 
 ```mermaid
 graph TD
     A[Request generation] --> B{Response OK?}
-    B -->|task_id present| C[Add to polling queue]
-    B -->|Failed / no task_id| D{Retries < 3?}
-    D -->|Yes| E[Queue for retry]
-    D -->|No| F[Report failure, continue others]
-    C --> G[Poll loop]
-    G --> H{Status?}
-    H -->|complete| I[Done]
-    H -->|failed| D
-    H -->|in_progress| G
+    B -->|task_id present| C[Add to pending queue]
+    B -->|Failed / no task_id| D{Quota error?}
+    D -->|Yes| E[Mark quota_exhausted — retry tomorrow]
+    D -->|No| F{Retries < 3?}
+    F -->|Yes| G[Backoff + auth refresh → retry]
+    F -->|No| H[Report failure, continue others]
+    C --> I[wait_for_completion]
+    I --> J{Status?}
+    J -->|complete| K[Done]
+    J -->|failed| F
+    J -->|in_progress| I
 ```
 
 **Workaround if still stuck:** Generate individually:
@@ -33,7 +35,7 @@ repo-artefacts generate -n $NOTEBOOK_ID --infographic
 
 **Symptom:** "✗ Audio timed out" after 15 minutes.
 
-**Cause:** NotebookLM generation can take 5-20 minutes depending on content size and server load.
+**Cause:** NotebookLM generation can take 5-20 minutes depending on content size and server load. Cinematic videos can take 30-40 minutes.
 
 **Fix:** Increase timeout:
 ```bash
@@ -111,6 +113,16 @@ notebooklm login
 
 This opens a browser for Google sign-in and stores cookies locally.
 
+### Auth token expired during long generation
+
+**Symptom:** RPC errors appear mid-generation after ~15 minutes.
+
+**Cause:** Google auth tokens expire after approximately 15 minutes.
+
+**Fix:** The tool handles this automatically via `_with_reauth()` which refreshes auth on every RPC error. If you see frequent auth refreshes, consider:
+- Running `notebooklm login` before starting a long pipeline
+- Using `--resume` after quota exhaustion to avoid re-generating completed artefacts
+
 ## Artefact Store Issues
 
 ### "Failed to clone artefact-store"
@@ -139,6 +151,25 @@ git commit -m "chore: remove artefacts (moved to store)"
 git push
 ```
 
+## Pipeline Resume Issues
+
+### "--resume doesn't skip stages"
+
+**Cause:** The `.pipeline-state.json` file is missing or corrupted.
+
+**Fix:** Check the state file exists:
+```bash
+cat docs/artefacts/.pipeline-state.json
+```
+If missing, the pipeline starts from scratch. If corrupted, delete it and re-run.
+
+### "Stage X failed but I fixed the issue, how do I retry?"
+
+Use `--resume` — the pipeline will skip past completed stages and retry from the failed one:
+```bash
+repo-artefacts pipeline /path/to/repo --resume
+```
+
 ## Common Errors
 
 | Error | Cause | Fix |
@@ -149,3 +180,4 @@ git push
 | `op: not signed in` | 1Password CLI session expired | Run `op signin` then retry |
 | `Failed to clone store` | Store repo missing or token lacks access | Check repo exists and token has `repo` scope |
 | `Store push failed` | Concurrent push or permissions | Re-run pipeline (auto-retries) |
+| `Daily quota exhausted` | NotebookLM caps infographics/slides | Retry tomorrow — caps reset at 24h intervals |

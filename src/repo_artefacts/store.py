@@ -20,48 +20,43 @@ class StoreError(RepoArtefactsError):
     """Error during artefact store operations."""
 
 
-def _validate_store_slug(store_slug: str) -> None:
-    """Reject store slugs that could resolve to dangerous paths.
+def _validate_store_slug(slug: str) -> None:
+    """Validate a store slug is in org/repo format and safe.
 
-    A valid slug looks like ``Org/repo`` — never an absolute path, never
-    containing ``..``, and never empty.  Getting this wrong is catastrophic:
-    ``Path(base) / "/absolute"`` silently discards the base in Python, so an
-    absolute path passed as a slug would make the cache dir point at the
-    real filesystem location — and ``shutil.rmtree`` would delete it.
+    Raises:
+        StoreError: If the slug is invalid or potentially dangerous.
     """
-    if not store_slug or not store_slug.strip():
+    if not slug or not slug.strip():
         raise StoreError("Store slug must not be empty")
-    if store_slug.startswith(("/", "~")):
-        raise StoreError(f"Store slug must be an org/repo identifier, not a path: {store_slug}")
-    if ".." in store_slug.split("/"):
-        raise StoreError(f"Store slug must not contain '..': {store_slug}")
-    parts = store_slug.strip("/").split("/")
-    if len(parts) != 2 or not all(parts):
-        raise StoreError(f"Store slug must be in 'org/repo' format, got: {store_slug}")
+    if slug.startswith("/") or slug.startswith("~"):
+        raise StoreError("Store slug must not be a path (use org/repo format)")
+    if ".." in slug:
+        raise StoreError("Store slug must not contain '..'")
+    parts = slug.split("/")
+    if len(parts) != 2:
+        raise StoreError("Store slug must be in org/repo format")
+    if not parts[0] or not parts[1]:
+        raise StoreError("Store slug must not be empty")
+
+
+def _safe_rmtree(path: Path) -> None:
+    """Safely remove a directory only if it's inside the store cache.
+
+    Raises:
+        StoreError: If the path is outside the cache directory.
+    """
+    cfg = load_config()
+    cache_root = cfg.store_cache_dir.resolve()
+    target = path.resolve()
+    if not str(target).startswith(str(cache_root)):
+        raise StoreError(f"Refusing to delete path outside the store cache: {target}")
+    shutil.rmtree(target)
 
 
 def _store_cache_dir(store_slug: str) -> Path:
     """Return cache directory for a store, e.g. ~/.cache/repo-artefacts/stores/Org/repo."""
-    _validate_store_slug(store_slug)
     cfg = load_config()
     return cfg.store_cache_dir / store_slug
-
-
-def _safe_rmtree(path: Path) -> None:
-    """Remove a directory only if it lives inside the expected cache tree.
-
-    Defense-in-depth: even if ``_validate_store_slug`` is bypassed or the
-    cache dir config changes, never delete a directory outside the cache.
-    """
-    cfg = load_config()
-    try:
-        path.resolve().relative_to(cfg.store_cache_dir.resolve())
-    except ValueError:
-        raise StoreError(
-            f"Refusing to delete {path} — it is outside the store cache "
-            f"directory ({cfg.store_cache_dir})"
-        ) from None
-    shutil.rmtree(path)
 
 
 def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path:
@@ -88,7 +83,7 @@ def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path:
             get_console().print(
                 f"[yellow]Pull failed, re-cloning: {result.stderr.strip()}[/yellow]"
             )
-            _safe_rmtree(cache_dir)
+            shutil.rmtree(cache_dir)
         else:
             return cache_dir
 
@@ -128,7 +123,6 @@ def publish_to_store(
     Returns:
         Base URL for this repo's artefacts on the store's Pages site.
     """
-    repo_name = repo_name.lower()
     dest = store_path / repo_name / "artefacts"
     dest.mkdir(parents=True, exist_ok=True)
 

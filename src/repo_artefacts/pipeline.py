@@ -18,17 +18,11 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from notebooklm import NotebookLMClient
-
 from repo_artefacts.collector import collect_repo_content, render_to_pdf
 from repo_artefacts.console import get_console
 from repo_artefacts.notebooklm import (
     ARTEFACT_CONFIG,
-    NAME_TO_KIND,
-    _request_artefact,
-    _with_reauth,
     download_artefacts,
-    get_completed_artefacts,
     upload_repo,
 )
 from repo_artefacts.store import (
@@ -122,6 +116,7 @@ class PipelineContext:
     timeout: int = 900
     state: PipelineState = field(default_factory=PipelineState)
     state_path: Path = field(default_factory=lambda: Path(STATE_FILENAME))
+    artefact_selection: list[str] | None = None  # None = all, [] = all, ["audio"] = only audio
 
     # Set during execution
     pdf_path: Path | None = None
@@ -235,10 +230,9 @@ class UploadStage:
 
 
 class GenerateStage:
-    """Generate artefacts sequentially with 30s gap. Only generates missing types."""
+    """Generate artefacts using the improved generate_artefacts()."""
 
     name = "generate"
-    gap_seconds = 30
 
     def pre_check(self, ctx: PipelineContext) -> StageResult:
         if not ctx.state.notebook_id:
@@ -246,155 +240,40 @@ class GenerateStage:
         return StageResult(Status.PASS)
 
     def execute(self, ctx: PipelineContext) -> StageResult:
-        nb_id = ctx.state.notebook_id
+        from repo_artefacts.notebooklm import generate_artefacts
 
-        # Check what's already completed
-        already_done: set[str] = set()
-        if not ctx.force_regen and not ctx.state.source_replaced:
-            already_done = asyncio.run(get_completed_artefacts(nb_id))
-            if already_done:
-                get_console().print(
-                    f"  Already completed: [green]{', '.join(sorted(already_done))}[/green]"
-                )
+        nb_id = ctx.state.notebook_id
+        force = ctx.force_regen or ctx.state.source_replaced
+
+        # Resolve artefact selection
+        target = ctx.artefact_selection or list(ARTEFACT_CONFIG)
 
         if ctx.state.source_replaced:
             get_console().print("  [yellow]Source replaced — regenerating all artefacts[/yellow]")
 
-        target = [a for a in ARTEFACT_CONFIG if a not in already_done]
-        if not target:
-            get_console().print("  [green]All artefacts already generated[/green]")
-            for name in ARTEFACT_CONFIG:
-                ctx.state.artefacts[name] = "completed"
-            return StageResult(Status.PASS, "All artefacts already completed")
+        result = asyncio.run(
+            generate_artefacts(nb_id, target, timeout=ctx.timeout, force_regen=force)
+        )
 
-        # Generate each type sequentially with gap
-        completed: list[str] = []
-        failed: list[str] = []
-
-        async def _generate_all() -> None:
-            async with await NotebookLMClient.from_storage() as client:
-                for i, artefact in enumerate(target):
-                    if i > 0:
-                        get_console().print(
-                            f"  [dim]Waiting {self.gap_seconds}s before next generation...[/dim]"
-                        )
-                        await asyncio.sleep(self.gap_seconds)
-                        await client.refresh_auth()
-
-                    get_console().print(f"  [blue]Generating {artefact}...[/blue]")
-
-                    # Only delete FAILED artefacts, never completed
-                    artifacts = await _with_reauth(
-                        client, lambda: client.artifacts.list(nb_id), f"list {artefact}"
-                    )
-                    target_kind = NAME_TO_KIND[artefact]
-                    for art in artifacts:
-                        if art.kind == target_kind and art.is_failed:
-                            get_console().print(
-                                f"    [dim]Deleting failed {artefact} ({art.id[:12]}...)[/dim]"
-                            )
-                            await _with_reauth(
-                                client,
-                                lambda aid=art.id: client.artifacts.delete(nb_id, aid),
-                                f"delete failed {artefact}",
-                            )
-
-                    # Request generation
-                    try:
-                        gen_status = await _with_reauth(
-                            client,
-                            lambda a=artefact: _request_artefact(client, nb_id, a),
-                            f"generate {artefact}",
-                        )
-                        if gen_status.is_failed or not gen_status.task_id:
-                            get_console().print(
-                                f"  [red]Failed to start {artefact}: {gen_status.error}[/red]"
-                            )
-                            failed.append(artefact)
-                            ctx.state.artefacts[artefact] = "failed"
-                            continue
-                    except Exception as e:
-                        get_console().print(f"  [red]Error generating {artefact}: {e}[/red]")
-                        failed.append(artefact)
-                        ctx.state.artefacts[artefact] = "failed"
-                        continue
-
-                    # Wait for completion with chunked polling + auth refresh.
-                    # Auth tokens expire after ~15 min, so we poll in 5-min
-                    # chunks with a refresh between each to prevent silent
-                    # auth failures inside the upstream poller.
-                    chunk_timeout = 300.0  # 5 min per chunk
-                    total_timeout = float(ctx.timeout)
-                    start = time.monotonic()
-                    final_status = None
-
-                    while time.monotonic() - start < total_timeout:
-                        remaining = total_timeout - (time.monotonic() - start)
-                        this_chunk = min(chunk_timeout, remaining)
-                        try:
-                            final_status = await _with_reauth(
-                                client,
-                                lambda tid=gen_status.task_id, t=this_chunk: (
-                                    client.artifacts.wait_for_completion(
-                                        nb_id,
-                                        tid,
-                                        initial_interval=2.0,
-                                        max_interval=10.0,
-                                        timeout=t,
-                                    )
-                                ),
-                                f"wait {artefact}",
-                            )
-                            break  # Returned normally — complete or failed
-                        except TimeoutError:
-                            elapsed = int(time.monotonic() - start)
-                            if time.monotonic() - start + chunk_timeout >= total_timeout:
-                                break  # True timeout — exit loop
-                            get_console().print(
-                                f"  [dim]… {artefact} still generating ({elapsed}s)"
-                                f" — refreshing auth[/dim]"
-                            )
-                            await client.refresh_auth()
-
-                    elapsed = int(time.monotonic() - start)
-                    if final_status is not None and final_status.is_complete:
-                        get_console().print(f"  [green]✓ {artefact} ready ({elapsed}s)[/green]")
-                        completed.append(artefact)
-                        ctx.state.artefacts[artefact] = "completed"
-                    elif final_status is not None and final_status.is_failed:
-                        get_console().print(
-                            f"  [red]✗ {artefact} failed ({elapsed}s): {final_status.error}[/red]"
-                        )
-                        failed.append(artefact)
-                        ctx.state.artefacts[artefact] = "failed"
-                    elif final_status is not None:
-                        get_console().print(
-                            f"  [red]✗ {artefact} ended with status "
-                            f"'{final_status.status}' ({elapsed}s)[/red]"
-                        )
-                        failed.append(artefact)
-                        ctx.state.artefacts[artefact] = "failed"
-                    else:
-                        get_console().print(f"  [red]✗ {artefact} timed out ({elapsed}s)[/red]")
-                        failed.append(artefact)
-                        ctx.state.artefacts[artefact] = "timed_out"
-
-        asyncio.run(_generate_all())
-
-        # Mark already-done ones
-        for name in already_done:
+        # Update state from result
+        for name in result.completed:
             ctx.state.artefacts[name] = "completed"
+        for name in result.failed:
+            ctx.state.artefacts[name] = "failed"
+        for name in result.quota_exhausted:
+            ctx.state.artefacts[name] = "quota_exhausted"
 
-        if failed:
+        if result.failed:
             return StageResult(
                 Status.FAIL,
-                f"Failed: {', '.join(failed)}. Completed: {', '.join(completed)}",
-                {"completed": completed, "failed": failed},
+                f"Failed: {', '.join(sorted(result.failed))}. "
+                f"Completed: {', '.join(sorted(result.completed))}",
+                {"completed": sorted(result.completed), "failed": sorted(result.failed)},
             )
         return StageResult(
             Status.PASS,
-            f"Generated: {', '.join(completed or list(already_done))}",
-            {"completed": completed + list(already_done)},
+            f"Generated: {', '.join(sorted(result.completed))}",
+            {"completed": sorted(result.completed)},
         )
 
     def post_check(self, ctx: PipelineContext) -> StageResult:
@@ -561,8 +440,9 @@ class CleanupStage:
             return StageResult(Status.SKIP, "Keeping notebook")
         if not ctx.state.notebook_id:
             return StageResult(Status.SKIP, "No notebook to clean up")
-        # Only clean up if all artefacts completed
-        all_done = all(ctx.state.artefacts.get(name) == "completed" for name in ARTEFACT_CONFIG)
+        # Only clean up if all artefacts completed (quota_exhausted counts as done)
+        acceptable = {"completed", "quota_exhausted"}
+        all_done = all(ctx.state.artefacts.get(name) in acceptable for name in ARTEFACT_CONFIG)
         if not all_done:
             return StageResult(
                 Status.SKIP,
@@ -644,10 +524,13 @@ def run_pipeline(
     dry_run: bool = False,
     resume: bool = False,
     timeout: int = 900,
+    artefact_selection: list[str] | None = None,
 ) -> bool:
     """Run the full artefact pipeline.
 
-    Returns True if all stages passed.
+    Args:
+        artefact_selection: If provided, only generate these artefact types.
+            None means generate all types.
     """
     repo_path = repo_path.resolve()
     repo_name = _resolve_repo_name(repo_path)
@@ -670,6 +553,7 @@ def run_pipeline(
         timeout=timeout,
         state=state,
         state_path=state_path,
+        artefact_selection=artefact_selection,
     )
 
     console = get_console()
