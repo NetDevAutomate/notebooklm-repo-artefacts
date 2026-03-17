@@ -128,6 +128,7 @@ def publish_to_store(
     Returns:
         Base URL for this repo's artefacts on the store's Pages site.
     """
+    repo_name = repo_name.lower()
     dest = store_path / repo_name / "artefacts"
     dest.mkdir(parents=True, exist_ok=True)
 

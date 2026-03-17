@@ -592,8 +592,8 @@ def _resolve_repo_name(repo_path: Path) -> str:
         name = url.rstrip("/").rsplit("/", 1)[-1]
         if name.endswith(".git"):
             name = name[:-4]
-        return name
-    return repo_path.resolve().name
+        return name.lower()
+    return repo_path.resolve().name.lower()
 
 
 def _notify(title: str, message: str) -> None:
