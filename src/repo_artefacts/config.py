@@ -15,6 +15,7 @@ class Config:
     """Repo-artefacts configuration."""
 
     default_store: str | None = None
+    default_timeout: int = 900
     store_cache_dir: Path = field(
         default_factory=lambda: Path.home() / ".cache" / "repo-artefacts" / "stores"
     )
@@ -32,6 +33,7 @@ def load_config() -> Config:
             data = tomllib.load(f)
         return Config(
             default_store=data.get("default_store"),
+            default_timeout=int(data["default_timeout"]) if "default_timeout" in data else 900,
             store_cache_dir=Path(data["store_cache_dir"])
             if "store_cache_dir" in data
             else Config().store_cache_dir,
@@ -46,6 +48,8 @@ def save_config(config: Config) -> None:
     lines: list[str] = []
     if config.default_store:
         lines.append(f'default_store = "{config.default_store}"')
+    if config.default_timeout != 900:
+        lines.append(f"default_timeout = {config.default_timeout}")
     if config.store_cache_dir != Config().store_cache_dir:
         lines.append(f'store_cache_dir = "{config.store_cache_dir}"')
     CONFIG_FILE.write_text("\n".join(lines) + "\n")

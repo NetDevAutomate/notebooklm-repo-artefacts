@@ -142,10 +142,10 @@ def generate(
         False, "--force-regen", help="Force regeneration (deletes existing completed artefacts)."
     ),
     timeout: int = typer.Option(
-        900,
+        0,
         "--timeout",
         "-t",
-        help="Timeout in seconds per artefact (default: 900 = 15min).",
+        help="Timeout in seconds per artefact (0 = use config default, default: 900).",
     ),
 ) -> None:
     """Generate artefacts from a NotebookLM notebook.
@@ -153,7 +153,11 @@ def generate(
     Idempotent by default — only generates missing artefact types and only
     deletes FAILED artefacts. Use --force-regen to regenerate everything.
     """
+    from repo_artefacts.config import load_config
     from repo_artefacts.pipeline import GenerateStage, PipelineContext, PipelineState
+
+    if timeout <= 0:
+        timeout = load_config().default_timeout
 
     nb_id = _get_notebook_id(notebook_id)
 
@@ -285,7 +289,10 @@ def publish(
     ),
     skip_verify: bool = typer.Option(False, "--skip-verify", help="Skip page verification."),
     timeout: int = typer.Option(
-        900, "--timeout", "-t", help="Generation timeout per artefact (seconds)."
+        0,
+        "--timeout",
+        "-t",
+        help="Generation timeout per artefact (seconds). 0 = use config default.",
     ),
     store: str | None = typer.Option(
         None,
@@ -300,6 +307,10 @@ def publish(
     With --store, publishes to a separate repo via GitHub Pages.
     """
     from repo_artefacts.config import load_config
+
+    if timeout <= 0:
+        timeout = load_config().default_timeout
+
     from repo_artefacts.pipeline import (
         DownloadStage,
         GenerateStage,
@@ -810,10 +821,10 @@ def pipeline(
         help="Show what each stage would do without executing.",
     ),
     timeout: int = typer.Option(
-        900,
+        0,
         "--timeout",
         "-t",
-        help="Generation timeout per artefact (seconds).",
+        help="Generation timeout per artefact (seconds). 0 = use config default.",
     ),
 ) -> None:
     """Stage-based pipeline: collect → upload → generate → download → publish → verify.
@@ -832,6 +843,8 @@ def pipeline(
 
     root = repo_path.resolve()
     cfg = load_config()
+    if timeout <= 0:
+        timeout = cfg.default_timeout
     store_slug = store or cfg.default_store
     if not store_slug:
         get_console().print(
