@@ -150,9 +150,7 @@ async def test_request_artefact_invalid_type() -> None:
 
 async def test_wait_for_artefact_completes() -> None:
     client = MagicMock()
-    client.artifacts.wait_for_completion = AsyncMock(
-        return_value=FakeStatus(task_id="task-1", status="completed")
-    )
+    client.artifacts.get = AsyncMock(return_value=FakeStatus(task_id="task-1", status="completed"))
     result = await _wait_for_artefact(client, "nb-1", "task-1", 60.0, "audio")
     assert result.is_complete
-    client.artifacts.wait_for_completion.assert_called_once()
+    client.artifacts.get.assert_called_once()

@@ -322,23 +322,33 @@ async def _wait_for_artefact(
     timeout: float,
     label: str,
 ) -> GenerationStatus:
-    """Wait for a single artefact generation to complete.
+    """Poll a single artefact generation until complete, failed, or timeout.
 
-    Uses upstream wait_for_completion() which has:
-    - Exponential backoff (2s → 10s)
-    - Media-readiness checks (won't report COMPLETED until URLs are populated)
-    - Proper timeout handling
+    Unlike upstream wait_for_completion(), this uses manual polling with
+    short intervals so concurrent gather() can check all pending artefacts
+    regularly. Each poll yields control back to the event loop.
     """
+    deadline = time.monotonic() + timeout
+    interval = 2.0
+    while time.monotonic() < deadline:
+        status = await _with_reauth(
+            client,
+            lambda: client.artifacts.get(notebook_id, task_id),
+            f"poll {label}",
+        )
+        if status.is_complete or status.is_failed:
+            return status
+        # Still generating — sleep briefly then let gather() check others
+        sleep_time = min(interval, deadline - time.monotonic())
+        if sleep_time > 0:
+            await asyncio.sleep(sleep_time)
+        interval = min(interval * 1.5, 10.0)  # exponential backoff, max 10s
+
+    # Timeout — return current status (likely still in_progress)
     return await _with_reauth(
         client,
-        lambda: client.artifacts.wait_for_completion(
-            notebook_id,
-            task_id,
-            initial_interval=2.0,
-            max_interval=10.0,
-            timeout=timeout,
-        ),
-        f"wait {label}",
+        lambda: client.artifacts.get(notebook_id, task_id),
+        f"poll {label} (final)",
     )
 
 
