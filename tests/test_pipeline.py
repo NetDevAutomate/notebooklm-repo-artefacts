@@ -626,8 +626,9 @@ class TestAllStages:
             "generate",
             "download",
             "publish",
+            "local_publish",
             "verify",
-            "readme",
+            "local_verify",
             "cleanup",
         ]
 

@@ -341,6 +341,70 @@ class PublishStage:
         return StageResult(Status.PASS)
 
 
+class LocalPublishStage:
+    """Publish artefacts to local repo via GitHub Pages (non-store mode)."""
+
+    name = "local_publish"
+
+    def pre_check(self, ctx: PipelineContext) -> StageResult:
+        if ctx.store_slug:
+            return StageResult(Status.SKIP, "Store mode — skipping local publish")
+        return StageResult(Status.PASS)
+
+    def execute(self, ctx: PipelineContext) -> StageResult:
+        from repo_artefacts.pages import get_github_info, setup_pages
+        from repo_artefacts.publish import check_artefacts, git_commit_and_push
+
+        org, repo_name = get_github_info(ctx.repo_path)
+        found = check_artefacts(ctx.output_dir)
+        url = setup_pages(
+            ctx.repo_path,
+            org,
+            repo_name,
+            available_artefacts=set(found),
+        )
+        git_commit_and_push(
+            ctx.repo_path,
+            "feat: publish NotebookLM artefacts with GitHub Pages player",
+            "origin",
+        )
+        return StageResult(Status.PASS, f"Published to {url}", {"base_url": url})
+
+    def post_check(self, ctx: PipelineContext) -> StageResult:
+        return StageResult(Status.PASS)
+
+
+class LocalVerifyStage:
+    """Verify artefacts are live on GitHub Pages (non-store mode)."""
+
+    name = "local_verify"
+
+    def pre_check(self, ctx: PipelineContext) -> StageResult:
+        if ctx.store_slug:
+            return StageResult(Status.SKIP, "Store mode — skipping local verify")
+        return StageResult(Status.PASS)
+
+    def execute(self, ctx: PipelineContext) -> StageResult:
+        from repo_artefacts.pages import get_github_info
+        from repo_artefacts.publish import check_artefacts, verify_pages
+
+        org, repo_name = get_github_info(ctx.repo_path)
+        base_url = f"https://{org.lower()}.github.io/{repo_name}/artefacts/"
+        found = check_artefacts(ctx.output_dir)
+        artefact_urls = {kind: base_url + path.name for kind, path in found.items()}
+        site_ok, verified = verify_pages(base_url, max_wait=120, artefact_urls=artefact_urls)
+        if site_ok:
+            return StageResult(
+                Status.PASS,
+                f"Verified {len(verified)} artefacts at {base_url}",
+                {"base_url": base_url, "verified": list(verified)},
+            )
+        return StageResult(Status.FAIL, f"Verification failed for {base_url}")
+
+    def post_check(self, ctx: PipelineContext) -> StageResult:
+        return StageResult(Status.PASS)
+
+
 class VerifyStage:
     """Verify artefacts are live on the store."""
 
@@ -470,8 +534,9 @@ ALL_STAGES = [
     GenerateStage(),
     DownloadStage(),
     PublishStage(),
+    LocalPublishStage(),
     VerifyStage(),
-    ReadmeStage(),
+    LocalVerifyStage(),
     CleanupStage(),
 ]
 

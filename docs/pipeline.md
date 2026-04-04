@@ -41,23 +41,22 @@ graph TD
     S2 --> S3[Copy artefacts + player page]
     S3 --> S4[Update manifest.json]
     S4 --> S5[Push artefact store]
-    S5 --> S6["Step 6: Update source README"]
-    S6 --> S7[Push README only — no binaries]
+    S5 --> S6["Step 7: Verify store deployment"]
+    S6 --> S7[Poll store Pages URL until 200]
 
-    S -->|No| H["Step 5: Setup GitHub Pages"]
+    S -->|No| H["Step 6: Setup GitHub Pages"]
     H --> H1[Create index.html player]
     H1 --> H2[Update README.md]
     H2 --> H3[Enable Pages via API]
     H3 --> I["Step 6: Commit & push<br/>docs/artefacts/ + README"]
+    I --> I1["Step 8: Verify deployment"]
+    I1 --> I2[Poll Pages URL until 200]
 
-    S7 --> J["Step 7: Verify deployment"]
-    I --> J
-    J --> J1["Poll Pages URL until 200"]
-
-    J1 --> K{keep_notebook?}
-    K -->|No| L["Step 8: Delete notebook"]
-    K -->|Yes| M["Done — notebook kept"]
-    L --> M
+    S7 --> J{keep_notebook?}
+    I2 --> J
+    J -->|No| K["Step 9: Delete notebook"]
+    J -->|Yes| L["Done — notebook kept"]
+    K --> L
 ```
 
 ## Stage-Based Architecture
@@ -82,16 +81,21 @@ graph TD
 
 ### Stage Details
 
-| # | Stage | Purpose | Pre-check | Post-check |
-|---|-------|---------|-----------|------------|
-| 1 | `collect` | Scan repo, render PDF | Is git repo? | PDF exists and non-empty? |
-| 2 | `upload` | Upload PDF to NotebookLM | PDF available? | Got notebook_id? |
-| 3 | `generate` | Generate artefacts | Has notebook_id? | All artefacts completed? |
-| 4 | `download` | Download to local disk | Has notebook_id + completed? | Files on disk? |
-| 5 | `publish` | Push to store or local Pages | Valid store slug? | — |
-| 6 | `verify` | Poll Pages URL until 200 | Store mode only | All artefacts verified? |
-| 7 | `readme` | Update source README | Has README + store? | — |
-| 8 | `cleanup` | Delete notebook | All done + not keep? | Notebook deleted? |
+| # | Stage | Purpose | Pre-check | Post-check | Runs When |
+|---|-------|---------|-----------|------------|-----------|
+| 1 | `collect` | Scan repo, render PDF | Is git repo? | PDF exists and non-empty? | Always |
+| 2 | `upload` | Upload PDF to NotebookLM | PDF available? | Got notebook_id? | Always |
+| 3 | `generate` | Generate artefacts | Has notebook_id? | All artefacts completed? | Always |
+| 4 | `download` | Download to local disk | Has notebook_id + completed? | Files on disk? | Always |
+| 5 | `publish` | Push to artefact store | Valid store slug? | — | **Store mode only** |
+| 6 | `local_publish` | Setup Pages, commit, push | No store configured | — | **Local mode only** |
+| 7 | `verify` | Verify store deployment | Store mode only | All artefacts verified? | **Store mode only** |
+| 8 | `local_verify` | Verify local Pages deployment | No store configured | All artefacts verified? | **Local mode only** |
+| 9 | `cleanup` | Delete notebook | All done + not keep? | Notebook deleted? | Always |
+
+**Local mode flow**: collect → upload → generate → download → **(publish skipped)** → local_publish → **(verify skipped)** → local_verify → cleanup
+
+**Store mode flow**: collect → upload → generate → download → publish → **(local_publish skipped)** → verify → **(local_verify skipped)** → cleanup
 
 ### State Persistence
 
