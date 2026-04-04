@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from notebooklm import (
+    Artifact,
     ArtifactType,
     AudioFormat,
     GenerationStatus,
@@ -26,7 +27,10 @@ from repo_artefacts.console import get_console
 T = TypeVar("T")
 
 REAUTH_BACKOFF = [2, 10, 30]  # seconds between re-auth retries
-RATE_LIMIT_BACKOFF = [30, 60, 300]  # escalating backoff for rate limits
+RATE_LIMIT_BACKOFF = [5, 15, 30, 60, 120]  # exponential backoff for retries
+
+CONCURRENCY_LIMIT = 2  # max concurrent generation requests
+POLL_WINDOW = 60.0  # seconds per polling cycle before checking for retries
 
 # Strings in GenerationStatus.error that indicate daily quota exhaustion
 # (not transient — retrying won't help until the 24h reset)
@@ -84,7 +88,7 @@ class GenerateResult:
     quota_exhausted: set[str] = field(default_factory=set)
 
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 
 
 # ---------------------------------------------------------------------------
@@ -321,12 +325,15 @@ async def _wait_for_artefact(
     task_id: str,
     timeout: float,
     label: str,
-) -> GenerationStatus:
+) -> Artifact:
     """Poll a single artefact generation until complete, failed, or timeout.
 
     Unlike upstream wait_for_completion(), this uses manual polling with
     short intervals so concurrent gather() can check all pending artefacts
     regularly. Each poll yields control back to the event loop.
+
+    Note: client.artifacts.get() returns an Artifact (has is_completed),
+    not a GenerationStatus (has is_complete).
     """
     deadline = time.monotonic() + timeout
     interval = 2.0
@@ -336,7 +343,7 @@ async def _wait_for_artefact(
             lambda: client.artifacts.get(notebook_id, task_id),
             f"poll {label}",
         )
-        if status.is_complete or status.is_failed:
+        if status.is_completed or status.is_failed:
             return status
         # Still generating — sleep briefly then let gather() check others
         sleep_time = min(interval, deadline - time.monotonic())
@@ -392,10 +399,10 @@ async def generate_artefacts(
     - Stale auth/CSRF -> refresh_auth + retry
     - Transient RPC errors -> backoff + retry
 
-    Uses upstream wait_for_completion() for polling, which provides:
-    - Exponential backoff (2s → 10s)
-    - Media-readiness checks (won't report COMPLETED until URLs populated)
-    - Proper timeout handling
+    Submits up to CONCURRENCY_LIMIT generation requests concurrently,
+    then polls with short windows (POLL_WINDOW) so failed items can be
+    retried promptly without waiting for slow successes to finish.
+    Retries are also submitted concurrently after a shared backoff.
 
     Args:
         force_regen: If True, delete ALL existing artefacts of each type before
@@ -433,59 +440,60 @@ async def generate_artefacts(
         completed: set[str] = set()
         permanently_failed: set[str] = set()
 
-        for artefact in to_generate:
-            get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
-            try:
-                # Only delete failed artefacts unless force_regen is set
-                await _delete_existing_by_type(
-                    client, notebook_id, artefact, failed_only=not force_regen
-                )
-                status = await _request_artefact(client, notebook_id, artefact)
-                if status.is_failed or not status.task_id:
-                    err = status.error or "no artifact_id returned"
-                    err_detail = (
-                        f"error={status.error!r}, error_code={status.error_code!r},"
-                        f" task_id={status.task_id!r}, status={status.status!r},"
-                        f" metadata={status.metadata!r}"
+        # Submit initial generation requests concurrently (max CONCURRENCY_LIMIT at a time)
+        sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+        async def _submit_one(artefact: str) -> None:
+            async with sem:
+                get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
+                try:
+                    await _delete_existing_by_type(
+                        client, notebook_id, artefact, failed_only=not force_regen
                     )
-                    if _is_quota_error(err):
-                        # Refresh auth and try once more to distinguish
-                        # quota exhaustion from stale CSRF
-                        get_console().print(
-                            f"[yellow]⚠[/yellow] {artefact} rejected ({err})"
-                            " — refreshing auth to confirm..."
+                    status = await _request_artefact(client, notebook_id, artefact)
+                    if status.is_failed or not status.task_id:
+                        err = status.error or "no artifact_id returned"
+                        err_detail = (
+                            f"error={status.error!r}, error_code={status.error_code!r},"
+                            f" task_id={status.task_id!r}, status={status.status!r},"
+                            f" metadata={status.metadata!r}"
                         )
-                        await client.refresh_auth()
-                        await asyncio.sleep(5)
-                        status = await _request_artefact(client, notebook_id, artefact)
-                        if status.is_failed or not status.task_id:
-                            quota_exhausted.add(artefact)
+                        if _is_quota_error(err):
                             get_console().print(
-                                f"[red]✗[/red] {artefact}: daily quota exhausted"
-                                " (NotebookLM caps infographics/slides"
-                                " separately). Retry after 24h reset."
+                                f"[yellow]⚠[/yellow] {artefact} rejected ({err})"
+                                " — refreshing auth to confirm..."
                             )
-                            continue
-                        else:
-                            # Auth refresh fixed it — was stale CSRF
+                            await client.refresh_auth()
+                            await asyncio.sleep(5)
+                            status = await _request_artefact(client, notebook_id, artefact)
+                            if status.is_failed or not status.task_id:
+                                quota_exhausted.add(artefact)
+                                get_console().print(
+                                    f"[red]✗[/red] {artefact}: daily quota exhausted"
+                                    " (NotebookLM caps infographics/slides"
+                                    " separately). Retry after 24h reset."
+                                )
+                                return
                             pending[artefact] = status.task_id
-                            continue
+                            return
+                        retries[artefact] += 1
+                        get_console().print(
+                            f"[yellow]⚠[/yellow] {artefact} failed immediately"
+                            f" ({err})"
+                            f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
+                        )
+                        get_console().print(f"  [dim]Detail: {err_detail}[/dim]")
+                        await client.refresh_auth()
+                    else:
+                        pending[artefact] = status.task_id
+                except Exception as e:
                     retries[artefact] += 1
                     get_console().print(
-                        f"[yellow]⚠[/yellow] {artefact} failed immediately"
-                        f" ({err})"
+                        f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
                         f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
                     )
-                    get_console().print(f"  [dim]Detail: {err_detail}[/dim]")
-                    await client.refresh_auth()
-                else:
-                    pending[artefact] = status.task_id
-            except Exception as e:
-                retries[artefact] += 1
-                get_console().print(
-                    f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
-                    f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
-                )
+
+        await asyncio.gather(*[_submit_one(a) for a in to_generate])
 
         # Queue initial failures for retry (excluding quota-exhausted)
         needs_retry = [
@@ -498,29 +506,33 @@ async def generate_artefacts(
         deadline = start_time + timeout
 
         get_console().print(
-            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES}[/dim]"
+            f"[dim]Timeout: {timeout}s ({timeout // 60}min), max retries: {MAX_RETRIES},"
+            f" concurrency: {CONCURRENCY_LIMIT}[/dim]"
         )
 
+        async def _poll_one(
+            label: str, task_id: str, poll_timeout: float
+        ) -> tuple[str, Artifact | None, Exception | None]:
+            try:
+                status = await _wait_for_artefact(
+                    client, notebook_id, task_id, poll_timeout, label
+                )
+                return label, status, None
+            except Exception as e:
+                return label, None, e
+
         while (pending or needs_retry) and time.monotonic() < deadline:
-            # Poll all pending artefacts concurrently FIRST — don't block on
-            # retry backoffs. Pending items are already generating on the server
-            # and should be checked immediately.
+            # Poll pending artefacts with a SHORT window so we can detect
+            # failures quickly and start retries without waiting for slow
+            # successes to finish.
             if pending:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-
-                async def _poll_one(label: str, task_id: str, timeout: float):
-                    try:
-                        status = await _wait_for_artefact(
-                            client, notebook_id, task_id, timeout, label
-                        )
-                        return label, status, None
-                    except Exception as e:
-                        return label, None, e
+                poll_window = min(POLL_WINDOW, remaining)
 
                 results = await asyncio.gather(
-                    *[_poll_one(label, tid, remaining) for label, tid in pending.items()]
+                    *[_poll_one(label, tid, poll_window) for label, tid in pending.items()]
                 )
 
                 for label, final_status, exc in results:
@@ -531,7 +543,7 @@ async def generate_artefacts(
                         await client.refresh_auth()
                         continue
 
-                    if final_status.is_complete:
+                    if final_status.is_completed:
                         get_console().print(f"[green]✓[/green] {label.capitalize()} ready")
                         completed.add(label)
                         pending.pop(label)
@@ -539,7 +551,6 @@ async def generate_artefacts(
                         pending.pop(label)
                         retries[label] += 1
                         if retries[label] <= MAX_RETRIES:
-                            # Clean up the failed artefact before retry
                             await _delete_existing_by_type(
                                 client, notebook_id, label, failed_only=True
                             )
@@ -550,7 +561,6 @@ async def generate_artefacts(
                             if label not in needs_retry:
                                 needs_retry.append(label)
                         else:
-                            # Clean up the failed artefact when giving up
                             await _delete_existing_by_type(
                                 client, notebook_id, label, failed_only=True
                             )
@@ -559,60 +569,74 @@ async def generate_artefacts(
                             )
                             permanently_failed.add(label)
                     else:
-                        # Still in progress — stays in pending
+                        # Still in progress — stays in pending for next poll cycle
                         elapsed = int(time.monotonic() - start_time)
                         get_console().print(
                             f"[dim]  … {label} still generating ({elapsed}s)[/dim]"
                         )
 
-            # Now handle retries — apply backoff before re-requesting
-            for label in list(needs_retry):
-                if time.monotonic() >= deadline:
-                    break
-
-                backoff = RATE_LIMIT_BACKOFF[min(retries[label] - 1, len(RATE_LIMIT_BACKOFF) - 1)]
+            # Handle retries concurrently — single shared backoff, then batch submit
+            if needs_retry and time.monotonic() < deadline:
+                max_backoff = max(
+                    RATE_LIMIT_BACKOFF[min(retries[label] - 1, len(RATE_LIMIT_BACKOFF) - 1)]
+                    for label in needs_retry
+                )
                 remaining = deadline - time.monotonic()
-                actual_backoff = min(backoff, max(remaining - 5, 0))
+                actual_backoff = min(max_backoff, max(remaining - 10, 0))
                 if actual_backoff <= 0:
                     break
 
                 get_console().print(
-                    f"[blue]⏳[/blue] Retrying {label}"
-                    f" ({retries[label]}/{MAX_RETRIES})"
+                    f"[blue]⏳[/blue] Retrying {len(needs_retry)} artefact(s)"
                     f" — backoff {actual_backoff:.0f}s + auth refresh..."
                 )
                 await asyncio.sleep(actual_backoff)
                 await client.refresh_auth()
                 get_console().print("[green]✓[/green] Auth refreshed")
-                try:
-                    await _delete_existing_by_type(client, notebook_id, label, failed_only=True)
-                    status = await _request_artefact(client, notebook_id, label)
-                    if status.is_failed or not status.task_id:
-                        retries[label] += 1
-                        if retries[label] > MAX_RETRIES:
+
+                retry_batch = list(needs_retry)
+
+                async def _retry_one(label: str) -> None:
+                    async with sem:
+                        try:
                             await _delete_existing_by_type(
                                 client, notebook_id, label, failed_only=True
                             )
-                            get_console().print(
-                                f"[red]✗[/red] {label} failed after"
-                                f" {MAX_RETRIES} retries: {status.error}"
-                            )
-                            permanently_failed.add(label)
-                            needs_retry.remove(label)
-                    else:
-                        pending[label] = status.task_id
-                        needs_retry.remove(label)
-                except Exception as e:
-                    retries[label] += 1
-                    if retries[label] > MAX_RETRIES:
-                        await _delete_existing_by_type(
-                            client, notebook_id, label, failed_only=True
-                        )
-                        get_console().print(
-                            f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries: {e}"
-                        )
-                        permanently_failed.add(label)
-                        needs_retry.remove(label)
+                            status = await _request_artefact(client, notebook_id, label)
+                            if status.is_failed or not status.task_id:
+                                retries[label] += 1
+                                if retries[label] > MAX_RETRIES:
+                                    await _delete_existing_by_type(
+                                        client, notebook_id, label, failed_only=True
+                                    )
+                                    get_console().print(
+                                        f"[red]✗[/red] {label} failed after"
+                                        f" {MAX_RETRIES} retries: {status.error}"
+                                    )
+                                    permanently_failed.add(label)
+                            else:
+                                pending[label] = status.task_id
+                        except Exception as e:
+                            retries[label] += 1
+                            if retries[label] > MAX_RETRIES:
+                                await _delete_existing_by_type(
+                                    client, notebook_id, label, failed_only=True
+                                )
+                                get_console().print(
+                                    f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries: {e}"
+                                )
+                                permanently_failed.add(label)
+
+                await asyncio.gather(*[_retry_one(label) for label in retry_batch])
+
+                # Update needs_retry: keep only items still eligible
+                needs_retry = [
+                    a
+                    for a in needs_retry
+                    if a not in pending
+                    and a not in permanently_failed
+                    and retries.get(a, 0) <= MAX_RETRIES
+                ]
 
         timed_out: set[str] = set()
         for label in list(pending) + needs_retry:

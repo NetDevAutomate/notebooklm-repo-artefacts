@@ -9,8 +9,10 @@ import pytest
 
 from repo_artefacts.notebooklm import (
     ARTEFACT_CONFIG,
+    CONCURRENCY_LIMIT,
     MAX_RETRIES,
     NAME_TO_ARTIFACT_TYPE,
+    POLL_WINDOW,
     _delete_existing_by_type,
     _request_artefact,
     _wait_for_artefact,
@@ -36,6 +38,11 @@ class FakeStatus:
 
     @property
     def is_complete(self) -> bool:
+        return self.status == "completed"
+
+    @property
+    def is_completed(self) -> bool:
+        """Alias — Artifact uses is_completed, GenerationStatus uses is_complete."""
         return self.status == "completed"
 
     @property
@@ -74,6 +81,14 @@ def test_artefact_config_has_method_key() -> None:
 
 def test_max_retries_is_reasonable() -> None:
     assert 1 <= MAX_RETRIES <= 5
+
+
+def test_concurrency_limit_is_positive() -> None:
+    assert CONCURRENCY_LIMIT >= 1
+
+
+def test_poll_window_is_reasonable() -> None:
+    assert 10 <= POLL_WINDOW <= 300
 
 
 # --- Delete existing by type ---
@@ -152,5 +167,5 @@ async def test_wait_for_artefact_completes() -> None:
     client = MagicMock()
     client.artifacts.get = AsyncMock(return_value=FakeStatus(task_id="task-1", status="completed"))
     result = await _wait_for_artefact(client, "nb-1", "task-1", 60.0, "audio")
-    assert result.is_complete
+    assert result.is_completed
     client.artifacts.get.assert_called_once()
