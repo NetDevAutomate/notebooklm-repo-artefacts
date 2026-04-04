@@ -1,38 +1,77 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-commit hooks — ordered fastest-to-slowest for fail-fast
+#
+# Philosophy: catch cheap, common errors first so expensive hooks never run.
+# Stages let you run subsets: `pre-commit run --hook-stage pre-commit` (default)
+# or `pre-commit run --hook-stage post-commit` (slow tests, opt-in).
+#
+# Fast (pre-commit): syntax, lint, format, secrets — runs on every commit
+# Slow (post-commit): type check, tests — run manually or in CI
+# ─────────────────────────────────────────────────────────────────────────────
+
+default_install_hook_types:
+  - pre-commit
+  - post-commit
+
 repos:
+  # ── Stage 1: Fast static checks (< 1s) ──────────────────────────────────
+  # Catches typos, broken syntax, and obvious mistakes before anything expensive.
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
       - id: check-added-large-files
         args: [--maxkb=1000]
+        stages: [pre-commit]
       - id: check-case-conflict
+        stages: [pre-commit]
       - id: check-json
+        stages: [pre-commit]
       - id: check-toml
+        stages: [pre-commit]
       - id: check-yaml
         args: [--unsafe]
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: debug-statements
+        stages: [pre-commit]
       - id: detect-private-key
+        stages: [pre-commit]
       - id: detect-aws-credentials
         args: [--allow-missing-credentials]
+        stages: [pre-commit]
       - id: trailing-whitespace
+        stages: [pre-commit]
       - id: mixed-line-ending
         args: [--fix=lf]
+        stages: [pre-commit]
       - id: check-merge-conflict
+        stages: [pre-commit]
 
+  # ── Stage 2: Lint + Format (1-3s) ──────────────────────────────────────
+  # Ruff lint first (auto-fixes), then format check. Order matters:
+  # if ruff --fix changes imports, format must re-check the result.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.5
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
+        stages: [pre-commit]
       - id: ruff-format
+        stages: [pre-commit]
 
+  # ── Stage 3: Secret detection (1-2s) ───────────────────────────────────
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
         exclude: ".*\\.lock$"
+        stages: [pre-commit]
 
+  # ── Stage 4: Type checking (3-8s) ──────────────────────────────────────
+  # Runs only on changed Python files. Runs on pre-commit so type errors
+  # are caught before commit, but after lint/format (which may change code).
   - repo: local
     hooks:
       - id: pyright
@@ -41,13 +80,23 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
+        stages: [pre-commit]
 
+  # ── Stage 5: Tests (opt-in, 5-15s) ─────────────────────────────────────
+  # NOT on pre-commit by default — too slow for every commit.
+  # Run manually: pre-commit run --hook-stage post-commit
+  # Or in CI: pre-commit run --all-files --hook-stage post-commit
+  #
+  # --last-failed: only re-runs tests that failed last time (fail-fast)
+  # --exitfirst: stops on first failure (fail-fast)
+  # --cov: tracks coverage (enforced in CI, not locally for speed)
       - id: pytest
-        name: pytest
-        entry: uv run pytest
+        name: pytest (last-failed only)
+        entry: uv run pytest --last-failed --exitfirst -q
         language: system
         types: [python]
         pass_filenames: false
+        stages: [post-commit]
 
       - id: check-links
         name: check-links
@@ -55,3 +104,4 @@ repos:
         language: system
         files: '(README\.md|docs/.*\.md)$'
         pass_filenames: false
+        stages: [pre-commit]

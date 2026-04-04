@@ -160,51 +160,66 @@ async def upload_repo(
     content_path: Path,
     repo_name: str,
     notebook_id: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | bool]:
     """Upload collected repo content to a NotebookLM notebook.
 
-    Checks for existing notebook with matching title before creating a new one.
+    If notebook_id is provided (resume/override), uses it directly.
+    Otherwise, deletes any existing notebook with matching title and
+    creates a fresh one to avoid stale artefact duplicates.
 
     Returns:
-        Dict with keys: id, title.
+        Dict with keys: id, title, source_replaced.
     """
     async with await NotebookLMClient.from_storage() as client:
+        source_replaced = False
         if notebook_id:
+            # Resume or explicit override — use existing notebook as-is
             nb_id = notebook_id
             nb_title = repo_name
             get_console().print(f"Using existing notebook: [bold]{nb_id}[/bold]")
         else:
+            # Fresh run: delete any existing notebook with this title
+            # to avoid stale artefact duplicates
             notebooks = await _with_reauth(
                 client, lambda: client.notebooks.list(), "list notebooks"
             )
             existing = next((nb for nb in notebooks if nb.title == repo_name), None)
             if existing:
-                nb_id = existing.id
-                nb_title = existing.title
-                get_console().print(f"Found existing notebook: [bold]{nb_title}[/bold] ({nb_id})")
-            else:
-                notebook = await _with_reauth(
-                    client,
-                    lambda: client.notebooks.create(title=repo_name),
-                    "create notebook",
-                )
-                nb_id = notebook.id
-                nb_title = notebook.title
-                get_console().print(f"Created notebook: [bold]{nb_title}[/bold] ({nb_id})")
-
-        # Remove existing sources with the same name to prevent duplicates
-        sources = await _with_reauth(client, lambda: client.sources.list(nb_id), "list sources")
-        filename = content_path.name
-        for src in sources:
-            if src.title == filename:
+                old_id = existing.id
                 get_console().print(
-                    f"  [dim]Replacing existing source: {src.title} ({src.id[:12]}...)[/dim]"
+                    f"  [dim]Deleting existing notebook: {existing.title} ({old_id})[/dim]"
                 )
                 await _with_reauth(
                     client,
-                    lambda sid=src.id: client.sources.delete(nb_id, sid),
-                    "delete duplicate source",
+                    lambda: client.notebooks.delete(old_id),
+                    "delete old notebook",
                 )
+                # Give the API time to process the deletion
+                await asyncio.sleep(2)
+                # Verify it's actually gone
+                notebooks = await _with_reauth(
+                    client, lambda: client.notebooks.list(), "verify deletion"
+                )
+                still_there = any(nb.id == old_id for nb in notebooks)
+                if still_there:
+                    get_console().print(
+                        "[yellow]⚠[/yellow] Notebook still exists after delete — retrying"
+                    )
+                    await _with_reauth(
+                        client,
+                        lambda: client.notebooks.delete(old_id),
+                        "delete old notebook (retry)",
+                    )
+                    await asyncio.sleep(3)
+
+            notebook = await _with_reauth(
+                client,
+                lambda: client.notebooks.create(title=repo_name),
+                "create notebook",
+            )
+            nb_id = notebook.id
+            nb_title = notebook.title
+            get_console().print(f"Created notebook: [bold]{nb_title}[/bold] ({nb_id})")
 
         await _with_reauth(
             client,
@@ -213,7 +228,7 @@ async def upload_repo(
         )
         get_console().print(f"  [green]✓[/green] Uploaded {content_path.name}")
 
-    return {"id": nb_id, "title": nb_title}
+    return {"id": nb_id, "title": nb_title, "source_replaced": source_replaced}
 
 
 # ---------------------------------------------------------------------------
@@ -526,16 +541,24 @@ async def generate_artefacts(
             if not pending and not needs_retry:
                 break
 
-            # Wait for each pending artefact using upstream wait_for_completion
+            # Wait for each pending artefact using upstream wait_for_completion.
+            # Cap the wait per item so no single artefact monopolises the timeout
+            # and leaves no time for retries of failed items.
             for label in list(pending):
                 task_id = pending[label]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
 
+                # Reserve at least 35s per other pending item (30s backoff + 5s buffer)
+                # so they all get a chance to be retried if needed.
+                other_pending = len(pending) - 1 + len(needs_retry)
+                reserved = other_pending * 35
+                max_wait = max(remaining - reserved, 30)
+
                 try:
                     final_status = await _wait_for_artefact(
-                        client, notebook_id, task_id, remaining, label
+                        client, notebook_id, task_id, max_wait, label
                     )
                 except Exception as e:
                     get_console().print(

@@ -1,14 +1,21 @@
-"""Collect key files from a git repository into a single markdown document."""
+"""Collect key files from a git repository into a single markdown document.
+
+Uses a priority-based pattern matching system:
+  1. Exact matches (README, agent instructions) — highest priority
+  2. Glob patterns for docs, config, and source files
+  3. Size budget enforced across all categories
+"""
 
 from __future__ import annotations
 
-import os
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from repo_artefacts.console import get_console
 from repo_artefacts.exceptions import CollectionError
 
-MAX_TOTAL_BYTES = 500 * 1024  # 500KB
+MAX_TOTAL_BYTES = 700 * 1024  # 700KB — enough for monorepo docs + key source files
 MAX_SOURCE_LINES = 500
 MAX_LINE_LENGTH = 10_000  # reject minified/generated files
 MAX_FILE_BYTES = 512 * 1024  # per-file size guard
@@ -36,9 +43,13 @@ SOURCE_EXTENSIONS = {
     ".sh",
     ".bash",
 }
+
+# Directories to skip entirely during tree walk
 SKIP_DIRS = frozenset(
     {
         ".git",
+        ".claude",
+        ".github",
         "node_modules",
         "__pycache__",
         ".venv",
@@ -51,56 +62,145 @@ SKIP_DIRS = frozenset(
         ".next",
         ".nuxt",
         "vendor",
+        ".mypy_cache",
+        ".pytest_cache",
+        "htmlcov",
+        "site-packages",
     }
 )
-README_NAMES = ["README.md", "README.rst", "README.txt", "README"]
-CONFIG_FILES = [
-    "pyproject.toml",
-    "setup.py",
-    "setup.cfg",
-    "Cargo.toml",
-    "package.json",
-    "go.mod",
-    "build.gradle",
-    "pom.xml",
-    "Makefile",
-    "CMakeLists.txt",
-    "deno.json",
+
+# Subdirectories within docs/ to skip (brainstorming, research, internal notes)
+SKIP_DOC_SUBDIRS = frozenset(
+    {
+        "internal",
+        "research",
+        "brainstorming",
+        "notes",
+        "drafts",
+        "archive",
+        "archived",
+    }
+)
+
+
+@dataclass
+class CollectionPattern:
+    """A file collection rule with priority and constraints."""
+
+    name: str
+    # Glob patterns relative to repo root (e.g., "docs/**/*.md")
+    globs: list[str]
+    # Regex patterns that must match the relative path (after glob match)
+    include_regex: list[str] = field(default_factory=list)
+    # Regex patterns that exclude a match even if glob/include match
+    exclude_regex: list[str] = field(default_factory=list)
+    # Max lines per file (None = no limit, uses _read_safe default)
+    max_lines: int | None = None
+    # Priority: lower number = collected first (1 = highest)
+    priority: int = 10
+
+
+# Ordered collection rules — higher priority rules run first
+COLLECTION_RULES: list[CollectionPattern] = [
+    # 1. README (exact match, full content)
+    CollectionPattern(
+        name="README",
+        globs=["README.md", "README.rst", "README.txt", "README"],
+        priority=1,
+    ),
+    # 2. Agent instruction files (exact match, full content)
+    CollectionPattern(
+        name="Agent instructions",
+        globs=["AGENTS.md", "CLAUDE.md", "GEMINI.md", "CODING.md", "DEVELOPMENT.md"],
+        priority=2,
+    ),
+    # 3. Root-level project docs (markdown files at repo root)
+    CollectionPattern(
+        name="Root docs",
+        globs=["*.md"],
+        exclude_regex=[
+            r"^README",
+            r"^AGENTS",
+            r"^CLAUDE",
+            r"^GEMINI",
+            r"^CODING",
+            r"^DEVELOPMENT",
+        ],
+        priority=3,
+    ),
+    # 4. Public documentation (docs/**/*.md, excluding internal/research)
+    CollectionPattern(
+        name="Documentation",
+        globs=["docs/**/*.md", "doc/**/*.md"],
+        exclude_regex=[
+            r"^docs/internal/",
+            r"^docs/research/",
+            r"^docs/brainstorming/",
+            r"^docs/notes/",
+            r"^docs/drafts/",
+            r"^docs/archive/",
+        ],
+        priority=4,
+    ),
+    # 5. Project configuration files
+    CollectionPattern(
+        name="Configuration",
+        globs=[
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "Cargo.toml",
+            "package.json",
+            "go.mod",
+            "build.gradle",
+            "pom.xml",
+            "Makefile",
+            "CMakeLists.txt",
+            "deno.json",
+            "mkdocs.yml",
+            ".pre-commit-config.yaml",
+            "ruff.toml",
+            ".ruff.toml",
+            "pyrightconfig.json",
+            "tsconfig.json",
+            "cliff.toml",
+        ],
+        priority=5,
+    ),
+    # 6. Source code (packages/*/src/ and src/)
+    CollectionPattern(
+        name="Source code",
+        globs=[
+            "packages/*/src/**/*",
+            "src/**/*",
+        ],
+        include_regex=[
+            # Only collect files with known source extensions
+            r"\.(py|ts|js|rs|java|go|rb|kt|swift|c|cpp|h|hpp|cs|scala|ex|exs|clj|zig|lua|sh|bash)$",
+        ],
+        exclude_regex=[
+            # Skip test files (they're large and less useful for overview)
+            r"test_",
+            r"_test\.",
+            r"/tests/",
+            # Skip generated/migration files
+            r"/migrations/",
+            # Skip __pycache__ and build artifacts (belt and braces with SKIP_DIRS)
+            r"__pycache__",
+            r"\.pyc$",
+        ],
+        max_lines=MAX_SOURCE_LINES,
+        priority=6,
+    ),
 ]
 
 
 def _is_git_repo(path: Path) -> bool:
     """Check if path is a git repo root (handles regular repos, worktrees, bare repos)."""
     git_path = path / ".git"
-    # Regular repo: .git is a directory
-    # Worktree: .git is a file containing 'gitdir: /path/to/...'
     if git_path.is_dir() or git_path.is_file():
         return True
-    # Bare repo: has HEAD and objects/ directly
     return (path / "HEAD").is_file() and (path / "objects").is_dir()
-
-
-def _find_file(repo_path: Path, names: list[str]) -> Path | None:
-    """Return the first matching file from a list of candidate names."""
-    for name in names:
-        path = repo_path / name
-        if path.is_file():
-            return path
-    return None
-
-
-def _iter_files(directory: Path, extensions: set[str] | None = None) -> list[Path]:
-    """Walk directory tree with pruning. Explicit followlinks=False."""
-    results: list[Path] = []
-    if not directory.is_dir():
-        return results
-    for root_str, dirs, files in os.walk(directory, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
-        root_path = Path(root_str)
-        for fname in sorted(files):
-            if extensions is None or Path(fname).suffix in extensions:
-                results.append(root_path / fname)
-    return results
 
 
 def _read_safe(path: Path, max_lines: int | None = None) -> str | None:
@@ -132,11 +232,62 @@ def _read_safe(path: Path, max_lines: int | None = None) -> str | None:
         return None
 
 
+def _matches_patterns(rel_path: str, include_regex: list[str], exclude_regex: list[str]) -> bool:
+    """Check if a relative path matches the include/exclude regex patterns."""
+    if include_regex and not any(re.search(p, rel_path) for p in include_regex):
+        return False
+    return not (exclude_regex and any(re.search(p, rel_path) for p in exclude_regex))
+
+
+def _collect_files(repo_path: Path) -> list[tuple[str, Path, int | None]]:
+    """Walk the repo and categorise files by matching against COLLECTION_RULES.
+
+    Returns list of (rule_name, file_path, max_lines) sorted by priority,
+    then by relative path within each rule. Deduplicates so each file is
+    only collected once (first matching rule wins).
+    """
+    seen: set[Path] = set()
+    results: list[tuple[int, str, Path, int | None]] = []  # (priority, rule_name, path, max_lines)
+
+    for rule in sorted(COLLECTION_RULES, key=lambda r: r.priority):
+        for glob_pattern in rule.globs:
+            for matched_path in repo_path.glob(glob_pattern):
+                if not matched_path.is_file():
+                    continue
+                if matched_path in seen:
+                    continue
+
+                rel = str(matched_path.relative_to(repo_path))
+
+                # Check include/exclude regex patterns
+                if not _matches_patterns(rel, rule.include_regex, rule.exclude_regex):
+                    continue
+
+                # Check if any parent directory is in SKIP_DIRS
+                parts = matched_path.parts
+                if any(part in SKIP_DIRS for part in parts):
+                    continue
+
+                seen.add(matched_path)
+                results.append((rule.priority, rule.name, matched_path, rule.max_lines))
+
+    # Sort by priority then by path for deterministic ordering
+    results.sort(key=lambda x: (x[0], str(x[2])))
+    return [(name, path, max_lines) for _, name, path, max_lines in results]
+
+
 def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
     """Collect key files from a git repo into a single markdown document.
 
-    Prioritises README and docs, then config, then source files.
-    Truncates source files if total content exceeds 500KB.
+    Uses pattern-based collection with priority ordering:
+      1. README
+      2. Agent instruction files (AGENTS.md, CLAUDE.md, etc.)
+      3. Root-level project docs (CONTRIBUTING.md, etc.)
+      4. Public documentation (docs/**/*.md, excluding internal/)
+      5. Configuration files (pyproject.toml, etc.)
+      6. Source code (packages/*/src/, src/)
+
+    Truncates source files and stops when total content exceeds MAX_TOTAL_BYTES.
 
     Args:
         repo_path: Path to the git repository root.
@@ -146,7 +297,7 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
         The output_path written to.
 
     Raises:
-        ValueError: If repo_path doesn't exist, isn't a directory, or isn't a git repo.
+        CollectionError: If repo_path doesn't exist, isn't a directory, or isn't a git repo.
     """
     if not repo_path.is_dir():
         raise CollectionError(f"'{repo_path}' is not a directory")
@@ -156,59 +307,32 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
     sections: list[tuple[str, str]] = []  # (heading, content)
     repo_name = repo_path.resolve().name
 
-    # 1. README
-    readme = _find_file(repo_path, README_NAMES)
-    if readme:
-        content = _read_safe(readme)
-        if content:
-            sections.append((readme.name, content))
-            get_console().print(f"  [green]✓[/green] {readme.name}")
+    # Collect all matching files, sorted by priority
+    matched_files = _collect_files(repo_path)
 
-    # 2. Docs directory
-    docs_dir = repo_path / "docs"
-    if docs_dir.is_dir():
-        for md_file in _iter_files(docs_dir, {".md", ".rst", ".txt"}):
-            content = _read_safe(md_file)
-            if content:
-                rel = md_file.relative_to(repo_path)
-                sections.append((str(rel), content))
-                get_console().print(f"  [green]✓[/green] {rel}")
+    total_bytes = 0
+    for _rule_name, file_path, max_lines in matched_files:
+        content = _read_safe(file_path, max_lines=max_lines)
+        if content is None:
+            continue
 
-    # 3. Project config
-    config = _find_file(repo_path, CONFIG_FILES)
-    if config:
-        content = _read_safe(config)
-        if content:
-            rel = config.relative_to(repo_path)
-            sections.append((str(rel), content))
-            get_console().print(f"  [green]✓[/green] {rel}")
+        content_bytes = len(content.encode("utf-8"))
+        if total_bytes + content_bytes > MAX_TOTAL_BYTES:
+            get_console().print(
+                "  [yellow]⚠[/yellow] Size limit reached, skipping remaining files"
+            )
+            break
 
-    # 4. Source files (budget-aware)
-    priority_total = sum(len(c) for _, c in sections)
-    source_budget = MAX_TOTAL_BYTES - priority_total
+        rel = str(file_path.relative_to(repo_path))
+        suffix = file_path.suffix.lstrip(".")
+        if suffix in SOURCE_EXTENSIONS:
+            # Wrap source files in code blocks
+            sections.append((rel, f"```{suffix}\n{content}\n```"))
+        else:
+            sections.append((rel, content))
 
-    if source_budget > 0:
-        src_dir = repo_path / "src"
-        search_dirs = [src_dir] if src_dir.is_dir() else [repo_path]
-        source_files = []
-        for d in search_dirs:
-            source_files.extend(_iter_files(d, SOURCE_EXTENSIONS))
-
-        source_used = 0
-        for src_file in source_files:
-            content = _read_safe(src_file, max_lines=MAX_SOURCE_LINES)
-            if content is None:
-                continue
-            if source_used + len(content) > source_budget:
-                get_console().print(
-                    "  [yellow]⚠[/yellow] Size limit reached, skipping remaining source files"
-                )
-                break
-            rel = src_file.relative_to(repo_path)
-            suffix = src_file.suffix.lstrip(".")
-            sections.append((str(rel), f"```{suffix}\n{content}\n```"))
-            source_used += len(content)
-            get_console().print(f"  [green]✓[/green] {rel}")
+        total_bytes += content_bytes
+        get_console().print(f"  [green]✓[/green] {rel}")
 
     # Write combined document
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -115,7 +115,7 @@ def process(
     table = Table(title="Notebook")
     table.add_column("Title", style="bold")
     table.add_column("ID", style="cyan")
-    table.add_row(result["title"], result["id"])
+    table.add_row(str(result["title"]), str(result["id"]))
     get_console().print(table)
 
     get_console().print("\nTo use this notebook in other commands:")
@@ -396,6 +396,16 @@ def pipeline(
     keep_notebook: bool = typer.Option(
         False, "--keep-notebook", help="Don't delete the notebook after publishing."
     ),
+    force_regen: bool = typer.Option(
+        False,
+        "--force-regen",
+        help="Delete ALL existing artefacts (including completed) and regenerate.",
+    ),
+    clean: bool = typer.Option(
+        False,
+        "--clean",
+        help="Delete existing artefacts directory and state before running.",
+    ),
     store: str | None = typer.Option(
         None,
         "--store",
@@ -451,11 +461,19 @@ def pipeline(
     else:
         artefact_selection = None  # All types
 
+    if clean:
+        artefacts_dir = root / "docs" / "artefacts"
+        if artefacts_dir.exists():
+            import shutil
+
+            shutil.rmtree(artefacts_dir)
+            get_console().print(f"[green]✓[/green] Cleaned artefacts directory: {artefacts_dir}")
+
     ok = run_pipeline(
         root,
         store_slug=store_slug,
         keep_notebook=keep_notebook,
-        force_regen=False,
+        force_regen=force_regen,
         dry_run=False,
         resume=resume,
         timeout=timeout,

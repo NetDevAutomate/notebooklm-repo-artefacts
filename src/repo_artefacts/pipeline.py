@@ -205,7 +205,7 @@ class UploadStage:
         result = asyncio.run(
             upload_repo(ctx.pdf_path, ctx.state.repo_name, ctx.state.notebook_id or None)
         )
-        ctx.state.notebook_id = result["id"]
+        ctx.state.notebook_id = str(result["id"])
         ctx.state.source_replaced = bool(result.get("source_replaced"))
 
         # Clean up temp files
