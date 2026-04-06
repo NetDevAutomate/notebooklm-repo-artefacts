@@ -39,6 +39,7 @@ def _make_ctx(
     notebook_id: str = "",
     artefacts: dict[str, str] | None = None,
     pdf_path: Path | None = None,
+    artefact_selection: list[str] | None = None,
 ) -> PipelineContext:
     """Build a PipelineContext wired to tmp_path for state persistence."""
     rp = repo_path or tmp_path / "repo"
@@ -57,6 +58,7 @@ def _make_ctx(
         state=state,
         state_path=output_dir / ".pipeline-state.json",
         pdf_path=pdf_path,
+        artefact_selection=artefact_selection,
     )
 
 
@@ -378,6 +380,46 @@ class TestGenerateStage:
         result = GenerateStage().post_check(ctx)
         assert result.status == Status.FAIL
 
+    # --- Artefact selection ---
+
+    def test_post_check_pass_with_partial_selection(self, tmp_path: Path) -> None:
+        """When only audio+video selected, post_check should pass with just those two."""
+        ctx = _make_ctx(
+            tmp_path,
+            artefacts={"audio": "completed", "video": "completed"},
+            artefact_selection=["audio", "video"],
+        )
+        result = GenerateStage().post_check(ctx)
+        assert result.status == Status.PASS
+
+    def test_post_check_fail_with_partial_selection_incomplete(self, tmp_path: Path) -> None:
+        """Selected audio+video but only audio completed — should fail."""
+        ctx = _make_ctx(
+            tmp_path,
+            artefacts={"audio": "completed"},
+            artefact_selection=["audio", "video"],
+        )
+        result = GenerateStage().post_check(ctx)
+        assert result.status == Status.FAIL
+        assert "video" in result.message
+
+    def test_post_check_pass_single_artefact_selection(self, tmp_path: Path) -> None:
+        """Single artefact selected and completed — should pass."""
+        ctx = _make_ctx(
+            tmp_path,
+            artefacts={"audio": "completed"},
+            artefact_selection=["audio"],
+        )
+        result = GenerateStage().post_check(ctx)
+        assert result.status == Status.PASS
+
+    def test_post_check_none_selection_checks_all(self, tmp_path: Path) -> None:
+        """None selection (default) should check all artefact types."""
+        partial = {name: "completed" for name in list(ARTEFACT_CONFIG)[:2]}
+        ctx = _make_ctx(tmp_path, artefacts=partial, artefact_selection=None)
+        result = GenerateStage().post_check(ctx)
+        assert result.status == Status.FAIL
+
 
 # ===========================================================================
 # DownloadStage.pre_check
@@ -515,6 +557,42 @@ class TestCleanupStage:
         result = CleanupStage().post_check(ctx)
         assert result.status == Status.PASS
 
+    # --- Artefact selection ---
+
+    def test_pass_with_partial_selection_all_done(self, tmp_path: Path) -> None:
+        """When only audio+video selected and both completed, cleanup should proceed."""
+        ctx = _make_ctx(
+            tmp_path,
+            notebook_id="nb-1",
+            artefacts={"audio": "completed", "video": "completed"},
+            artefact_selection=["audio", "video"],
+        )
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+    def test_skip_with_partial_selection_incomplete(self, tmp_path: Path) -> None:
+        """When only audio selected but not completed, cleanup should skip."""
+        ctx = _make_ctx(
+            tmp_path,
+            notebook_id="nb-1",
+            artefacts={"audio": "failed"},
+            artefact_selection=["audio"],
+        )
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.SKIP
+        assert "retry" in result.message.lower()
+
+    def test_pass_with_partial_selection_quota_exhausted(self, tmp_path: Path) -> None:
+        """quota_exhausted counts as done for cleanup purposes."""
+        ctx = _make_ctx(
+            tmp_path,
+            notebook_id="nb-1",
+            artefacts={"audio": "completed", "infographic": "quota_exhausted"},
+            artefact_selection=["audio", "infographic"],
+        )
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
 
 # ===========================================================================
 # CollectStage.post_check
@@ -640,3 +718,93 @@ class TestAllStages:
             assert hasattr(stage, "execute"), f"{stage.name} missing execute"
             assert hasattr(stage, "post_check"), f"{stage.name} missing post_check"
             assert hasattr(stage, "name"), "stage missing name attribute"
+
+
+# ===========================================================================
+# LocalPublishStage / LocalVerifyStage pre_check
+# ===========================================================================
+
+
+class TestLocalPublishStage:
+    def test_skip_with_store(self, tmp_path: Path) -> None:
+        from repo_artefacts.pipeline import LocalPublishStage
+
+        ctx = _make_ctx(tmp_path, store_slug="Org/repo")
+        result = LocalPublishStage().pre_check(ctx)
+        assert result.status == Status.SKIP
+
+    def test_pass_without_store(self, tmp_path: Path) -> None:
+        from repo_artefacts.pipeline import LocalPublishStage
+
+        ctx = _make_ctx(tmp_path, store_slug=None)
+        result = LocalPublishStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+
+class TestLocalVerifyStage:
+    def test_skip_with_store(self, tmp_path: Path) -> None:
+        from repo_artefacts.pipeline import LocalVerifyStage
+
+        ctx = _make_ctx(tmp_path, store_slug="Org/repo")
+        result = LocalVerifyStage().pre_check(ctx)
+        assert result.status == Status.SKIP
+
+    def test_pass_without_store(self, tmp_path: Path) -> None:
+        from repo_artefacts.pipeline import LocalVerifyStage
+
+        ctx = _make_ctx(tmp_path, store_slug=None)
+        result = LocalVerifyStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+
+# ===========================================================================
+# run_pipeline — notebook_id passthrough
+# ===========================================================================
+
+
+class TestRunPipelineNotebookId:
+    """Verify that notebook_id is wired through to PipelineState."""
+
+    def test_notebook_id_set_on_state(self, tmp_path: Path) -> None:
+        """When notebook_id is passed, it should appear in state before stages run."""
+        from unittest.mock import patch
+
+        from repo_artefacts.pipeline import run_pipeline
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "docs" / "artefacts").mkdir(parents=True)
+
+        captured_ctx = {}
+
+        def fake_pre_check(self, ctx):
+            captured_ctx["notebook_id"] = ctx.state.notebook_id
+            return StageResult(Status.FAIL, "test halt")
+
+        with patch.object(CollectStage, "pre_check", fake_pre_check):
+            run_pipeline(repo, notebook_id="nb-preset-123")
+
+        assert captured_ctx["notebook_id"] == "nb-preset-123"
+
+    def test_notebook_id_none_leaves_state_empty(self, tmp_path: Path) -> None:
+        """When notebook_id is None, state.notebook_id should remain empty."""
+        from unittest.mock import patch
+
+        from repo_artefacts.pipeline import run_pipeline
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "docs" / "artefacts").mkdir(parents=True)
+
+        captured_ctx = {}
+
+        def fake_pre_check(self, ctx):
+            captured_ctx["notebook_id"] = ctx.state.notebook_id
+            return StageResult(Status.FAIL, "test halt")
+
+        with patch.object(CollectStage, "pre_check", fake_pre_check):
+            run_pipeline(repo, notebook_id=None)
+
+        assert captured_ctx["notebook_id"] == ""

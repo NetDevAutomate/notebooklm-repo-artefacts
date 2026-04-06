@@ -8,12 +8,15 @@ Uses a priority-based pattern matching system:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from repo_artefacts.console import get_console
 from repo_artefacts.exceptions import CollectionError
+
+logger = logging.getLogger(__name__)
 
 MAX_TOTAL_BYTES = 700 * 1024  # 700KB — enough for monorepo docs + key source files
 MAX_SOURCE_LINES = 500
@@ -309,15 +312,18 @@ def collect_repo_content(repo_path: Path, output_path: Path) -> Path:
 
     # Collect all matching files, sorted by priority
     matched_files = _collect_files(repo_path)
+    logger.info("Matched %d files from %s", len(matched_files), repo_path)
 
     total_bytes = 0
     for _rule_name, file_path, max_lines in matched_files:
         content = _read_safe(file_path, max_lines=max_lines)
         if content is None:
+            logger.debug("Skipped (unreadable/too large): %s", file_path.relative_to(repo_path))
             continue
 
         content_bytes = len(content.encode("utf-8"))
         if total_bytes + content_bytes > MAX_TOTAL_BYTES:
+            logger.info("Size budget exhausted at %d bytes, skipping remaining files", total_bytes)
             get_console().print(
                 "  [yellow]⚠[/yellow] Size limit reached, skipping remaining files"
             )
@@ -372,6 +378,7 @@ def render_to_pdf(md_path: Path) -> Path:
     content = md_path.read_text(encoding="utf-8")
     title = md_path.stem.replace("_", " ").title()
 
+    logger.info("Rendering PDF from %s (%d chars)", md_path, len(content))
     get_console().print("[blue]⏳[/blue] Rendering markdown to PDF (with Mermaid diagrams)...")
     convert_markdown_to_pdf_html(
         content,

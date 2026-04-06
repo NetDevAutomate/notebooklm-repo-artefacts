@@ -14,6 +14,7 @@ from repo_artefacts.notebooklm import (
     NAME_TO_ARTIFACT_TYPE,
     POLL_WINDOW,
     _delete_existing_by_type,
+    _is_quota_error,
     _request_artefact,
     _wait_for_artefact,
 )
@@ -169,3 +170,56 @@ async def test_wait_for_artefact_completes() -> None:
     result = await _wait_for_artefact(client, "nb-1", "task-1", 60.0, "audio")
     assert result.is_completed
     client.artifacts.get.assert_called_once()
+
+
+# --- Quota error detection ---
+
+
+class TestIsQuotaError:
+    """Tests for _is_quota_error() with message and error_code detection."""
+
+    def test_matches_rate_limit_in_message(self) -> None:
+        assert _is_quota_error("Request rate limit exceeded") is True
+
+    def test_matches_quota_exceeded_in_message(self) -> None:
+        assert _is_quota_error("Daily quota exceeded for this resource") is True
+
+    def test_matches_quota_in_message(self) -> None:
+        assert _is_quota_error("quota limit reached") is True
+
+    def test_case_insensitive(self) -> None:
+        assert _is_quota_error("RATE LIMIT exceeded") is True
+
+    def test_no_match_returns_false(self) -> None:
+        assert _is_quota_error("Internal server error") is False
+
+    def test_empty_string_returns_false(self) -> None:
+        assert _is_quota_error("") is False
+
+    def test_none_message_returns_false(self) -> None:
+        assert _is_quota_error(None) is False
+
+    def test_none_message_with_none_code_returns_false(self) -> None:
+        assert _is_quota_error(None, None) is False
+
+    def test_error_code_user_displayable_error(self) -> None:
+        """error_code=USER_DISPLAYABLE_ERROR should match even with None message."""
+        assert _is_quota_error(None, "USER_DISPLAYABLE_ERROR") is True
+
+    def test_error_code_case_insensitive(self) -> None:
+        assert _is_quota_error(None, "user_displayable_error") is True
+
+    def test_error_code_trumps_empty_message(self) -> None:
+        """error_code match should succeed even with empty error message."""
+        assert _is_quota_error("", "USER_DISPLAYABLE_ERROR") is True
+
+    def test_unrelated_error_code_not_matched(self) -> None:
+        assert _is_quota_error("some error", "INTERNAL_ERROR") is False
+
+    def test_message_match_without_error_code(self) -> None:
+        """Message-based matching should work when error_code is None."""
+        assert _is_quota_error("quota exceeded", None) is True
+
+    def test_both_message_and_code_match(self) -> None:
+        """When both match, should return True (error_code checked first)."""
+        assert _is_quota_error("quota exceeded", "USER_DISPLAYABLE_ERROR") is True

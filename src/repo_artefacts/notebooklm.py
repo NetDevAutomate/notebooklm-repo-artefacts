@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ from rich.table import Table
 from repo_artefacts.console import get_console
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 REAUTH_BACKOFF = [2, 10, 30]  # seconds between re-auth retries
 RATE_LIMIT_BACKOFF = [5, 15, 30, 60, 120]  # exponential backoff for retries
@@ -117,24 +120,44 @@ async def _with_reauth(
         except RateLimitError as e:
             last_exc = e
             bk = RATE_LIMIT_BACKOFF[min(attempt - 1, len(RATE_LIMIT_BACKOFF) - 1)]
+            logger.warning(
+                "[%s] RateLimitError: %s — backoff %ds, attempt %d/%d",
+                label,
+                e,
+                bk,
+                attempt,
+                len(backoffs),
+            )
             get_console().print(
                 f"[yellow]⚠[/yellow] {label} rate limited — "
                 f"backoff {bk}s then re-auth (attempt {attempt}/{len(backoffs)})"
             )
             await asyncio.sleep(bk)
             await client.refresh_auth()
+            logger.info("[%s] Auth refreshed after rate limit", label)
             get_console().print("[green]✓[/green] Auth refreshed after rate limit")
         except AuthError as e:
             last_exc = e
+            logger.warning(
+                "[%s] AuthError: %s — refreshing, attempt %d/%d", label, e, attempt, len(backoffs)
+            )
             get_console().print(
                 f"[yellow]⚠[/yellow] {label} auth/CSRF expired — "
                 f"refreshing (attempt {attempt}/{len(backoffs)})"
             )
             await asyncio.sleep(wait)
             await client.refresh_auth()
+            logger.info("[%s] Auth refreshed after AuthError", label)
             get_console().print("[green]✓[/green] Auth refreshed")
         except RPCError as e:
             last_exc = e
+            logger.warning(
+                "[%s] RPCError: %s — refreshing auth, attempt %d/%d",
+                label,
+                e,
+                attempt,
+                len(backoffs),
+            )
             get_console().print(
                 f"[yellow]⚠[/yellow] {label} RPC error: {e} — "
                 f"refreshing auth (attempt {attempt}/{len(backoffs)})"
@@ -143,16 +166,27 @@ async def _with_reauth(
             await client.refresh_auth()
 
     # Final attempt after all backoffs exhausted
+    logger.info("[%s] Final attempt after %d retries", label, len(backoffs))
     try:
         return await fn()
     except RPCError as exc:
+        logger.error("[%s] FAILED after all retries: %s", label, exc)
         raise (last_exc or RPCError(f"{label} failed after re-auth retries")) from exc  # type: ignore[call-arg]
 
 
-def _is_quota_error(error_msg: str) -> bool:
-    """Check if an error message indicates daily quota exhaustion."""
-    lower = error_msg.lower()
-    return any(p in lower for p in QUOTA_ERROR_PATTERNS)
+def _is_quota_error(error_msg: str | None, error_code: str | None = None) -> bool:
+    """Check if an error indicates daily quota exhaustion.
+
+    Checks both the error message text (pattern matching) and the error_code
+    field. In v0.3.4, GenerationStatus.error can be None even for quota
+    failures, but error_code='USER_DISPLAYABLE_ERROR' is reliably set.
+    """
+    if error_code and error_code.upper() == "USER_DISPLAYABLE_ERROR":
+        return True
+    if error_msg:
+        lower = error_msg.lower()
+        return any(p in lower for p in QUOTA_ERROR_PATTERNS)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -174,12 +208,16 @@ async def upload_repo(
     Returns:
         Dict with keys: id, title, source_replaced.
     """
+    logger.info(
+        "upload_repo: content=%s repo=%s notebook_id=%s", content_path, repo_name, notebook_id
+    )
     async with await NotebookLMClient.from_storage() as client:
         source_replaced = False
         if notebook_id:
             # Resume or explicit override — use existing notebook as-is
             nb_id = notebook_id
             nb_title = repo_name
+            logger.info("Using existing notebook: %s", nb_id)
             get_console().print(f"Using existing notebook: [bold]{nb_id}[/bold]")
         else:
             # Fresh run: delete any existing notebook with this title
@@ -231,6 +269,47 @@ async def upload_repo(
             "upload source",
         )
         get_console().print(f"  [green]✓[/green] Uploaded {content_path.name}")
+
+        # Wait for source processing before generation can succeed
+        get_console().print("  [blue]⏳[/blue] Waiting for source processing...")
+        max_wait = 120  # seconds
+        poll_interval = 5
+        elapsed = 0
+        while elapsed < max_wait:
+            sources = await _with_reauth(
+                client, lambda: client.sources.list(nb_id), "poll source status"
+            )
+            if not sources:
+                logger.warning("No sources found after upload — retrying poll")
+                await asyncio.sleep(poll_interval)
+                elapsed += poll_interval
+                continue
+
+            all_ready = all(s.is_ready for s in sources)
+            any_error = any(s.is_error for s in sources)
+            processing = [s.title for s in sources if s.is_processing]
+
+            if any_error:
+                error_sources = [s.title for s in sources if s.is_error]
+                logger.error("Source processing failed: %s", error_sources)
+                get_console().print(f"  [red]✗[/red] Source processing failed: {error_sources}")
+                break
+            if all_ready:
+                logger.info("All %d source(s) ready", len(sources))
+                get_console().print(
+                    f"  [green]✓[/green] Source processing complete ({len(sources)} source(s) ready)"
+                )
+                break
+
+            logger.debug("Sources still processing: %s (%ds)", processing, elapsed)
+            get_console().print(f"  [dim]  … processing ({elapsed}s)[/dim]")
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+        else:
+            logger.warning("Source processing timed out after %ds — proceeding anyway", max_wait)
+            get_console().print(
+                f"  [yellow]⚠[/yellow] Source processing timed out after {max_wait}s — proceeding"
+            )
 
     return {"id": nb_id, "title": nb_title, "source_replaced": source_replaced}
 
@@ -409,6 +488,13 @@ async def generate_artefacts(
             regenerating. If False (default), only delete FAILED artefacts and
             skip types that are already completed.
     """
+    logger.info(
+        "generate_artefacts: notebook=%s artefacts=%s timeout=%ds force_regen=%s",
+        notebook_id,
+        artefacts,
+        timeout,
+        force_regen,
+    )
     async with await NotebookLMClient.from_storage() as client:
         # Pre-check: remove duplicate sources to avoid confused generation
         await _deduplicate_sources(client, notebook_id)
@@ -445,12 +531,21 @@ async def generate_artefacts(
 
         async def _submit_one(artefact: str) -> None:
             async with sem:
+                logger.info("[submit] %s: requesting generation", artefact)
                 get_console().print(f"[blue]⏳[/blue] Requesting {artefact}...")
                 try:
                     await _delete_existing_by_type(
                         client, notebook_id, artefact, failed_only=not force_regen
                     )
                     status = await _request_artefact(client, notebook_id, artefact)
+                    logger.debug(
+                        "[submit] %s: response — task_id=%s status=%s error=%r error_code=%r",
+                        artefact,
+                        status.task_id,
+                        status.status,
+                        status.error,
+                        status.error_code,
+                    )
                     if status.is_failed or not status.task_id:
                         err = status.error or "no artifact_id returned"
                         err_detail = (
@@ -458,15 +553,21 @@ async def generate_artefacts(
                             f" task_id={status.task_id!r}, status={status.status!r},"
                             f" metadata={status.metadata!r}"
                         )
-                        if _is_quota_error(err):
+                        logger.warning("[submit] %s: immediate failure — %s", artefact, err_detail)
+                        if _is_quota_error(err, status.error_code):
                             get_console().print(
                                 f"[yellow]⚠[/yellow] {artefact} rejected ({err})"
                                 " — refreshing auth to confirm..."
+                            )
+                            logger.warning(
+                                "[submit] %s: quota suspected — refreshing auth to confirm",
+                                artefact,
                             )
                             await client.refresh_auth()
                             await asyncio.sleep(5)
                             status = await _request_artefact(client, notebook_id, artefact)
                             if status.is_failed or not status.task_id:
+                                logger.error("[submit] %s: QUOTA EXHAUSTED confirmed", artefact)
                                 quota_exhausted.add(artefact)
                                 get_console().print(
                                     f"[red]✗[/red] {artefact}: daily quota exhausted"
@@ -474,9 +575,21 @@ async def generate_artefacts(
                                     " separately). Retry after 24h reset."
                                 )
                                 return
+                            logger.info(
+                                "[submit] %s: quota false alarm — task_id=%s",
+                                artefact,
+                                status.task_id,
+                            )
                             pending[artefact] = status.task_id
                             return
                         retries[artefact] += 1
+                        logger.warning(
+                            "[submit] %s: transient failure, retry %d/%d — %s",
+                            artefact,
+                            retries[artefact],
+                            MAX_RETRIES,
+                            err,
+                        )
                         get_console().print(
                             f"[yellow]⚠[/yellow] {artefact} failed immediately"
                             f" ({err})"
@@ -485,9 +598,16 @@ async def generate_artefacts(
                         get_console().print(f"  [dim]Detail: {err_detail}[/dim]")
                         await client.refresh_auth()
                     else:
+                        logger.info("[submit] %s: accepted — task_id=%s", artefact, status.task_id)
                         pending[artefact] = status.task_id
                 except Exception as e:
                     retries[artefact] += 1
+                    logger.exception(
+                        "[submit] %s: exception on request, retry %d/%d",
+                        artefact,
+                        retries[artefact],
+                        MAX_RETRIES,
+                    )
                     get_console().print(
                         f"[yellow]⚠[/yellow] Failed to request {artefact}: {e}"
                         f" — will retry ({retries[artefact]}/{MAX_RETRIES})"
@@ -522,6 +642,15 @@ async def generate_artefacts(
                 return label, None, e
 
         while (pending or needs_retry) and time.monotonic() < deadline:
+            elapsed = int(time.monotonic() - start_time)
+            remaining_s = int(deadline - time.monotonic())
+            logger.debug(
+                "[poll] loop: pending=%s needs_retry=%s elapsed=%ds remaining=%ds",
+                list(pending.keys()),
+                needs_retry,
+                elapsed,
+                remaining_s,
+            )
             # Poll pending artefacts with a SHORT window so we can detect
             # failures quickly and start retries without waiting for slow
             # successes to finish.
@@ -537,19 +666,37 @@ async def generate_artefacts(
 
                 for label, final_status, exc in results:
                     if exc is not None or final_status is None:
+                        logger.warning("[poll] %s: error — %s", label, exc)
                         get_console().print(
                             f"[yellow]⚠[/yellow] Poll error for {label}: {exc} — refreshing auth"
                         )
                         await client.refresh_auth()
                         continue
 
+                    logger.debug(
+                        "[poll] %s: is_completed=%s is_failed=%s status=%s error=%r",
+                        label,
+                        final_status.is_completed,
+                        final_status.is_failed,
+                        getattr(final_status, "status", "?"),
+                        getattr(final_status, "error", None),
+                    )
+
                     if final_status.is_completed:
+                        logger.info("[poll] %s: COMPLETED", label)
                         get_console().print(f"[green]✓[/green] {label.capitalize()} ready")
                         completed.add(label)
                         pending.pop(label)
                     elif final_status.is_failed:
                         pending.pop(label)
                         retries[label] += 1
+                        logger.warning(
+                            "[poll] %s: FAILED — error=%r, retry %d/%d",
+                            label,
+                            getattr(final_status, "error", None),
+                            retries[label],
+                            MAX_RETRIES,
+                        )
                         if retries[label] <= MAX_RETRIES:
                             await _delete_existing_by_type(
                                 client, notebook_id, label, failed_only=True
@@ -564,6 +711,11 @@ async def generate_artefacts(
                             await _delete_existing_by_type(
                                 client, notebook_id, label, failed_only=True
                             )
+                            logger.error(
+                                "[poll] %s: PERMANENTLY FAILED after %d retries",
+                                label,
+                                MAX_RETRIES,
+                            )
                             get_console().print(
                                 f"[red]✗[/red] {label} failed after {MAX_RETRIES} retries"
                             )
@@ -571,6 +723,7 @@ async def generate_artefacts(
                     else:
                         # Still in progress — stays in pending for next poll cycle
                         elapsed = int(time.monotonic() - start_time)
+                        logger.debug("[poll] %s: still generating (%ds)", label, elapsed)
                         get_console().print(
                             f"[dim]  … {label} still generating ({elapsed}s)[/dim]"
                         )
@@ -640,12 +793,14 @@ async def generate_artefacts(
 
         timed_out: set[str] = set()
         for label in list(pending) + needs_retry:
+            logger.error("[timeout] %s: TIMED OUT after %ds", label, timeout)
             get_console().print(f"[red]✗[/red] {label.capitalize()} timed out")
             timed_out.add(label)
             # Clean up any failed artefacts from timed-out items
             await _delete_existing_by_type(client, notebook_id, label, failed_only=True)
 
         if quota_exhausted:
+            logger.warning("Quota-exhausted artefacts: %s", sorted(quota_exhausted))
             get_console().print(
                 f"\n[yellow]i[/yellow] Quota-limited artefacts: "
                 f"[bold]{', '.join(sorted(quota_exhausted))}[/bold]"
@@ -656,12 +811,19 @@ async def generate_artefacts(
                 f" {''.join(f' --{a}' for a in sorted(quota_exhausted))}"
             )
 
-    get_console().print("[bold green]Done.[/bold green]")
-    return GenerateResult(
+    result = GenerateResult(
         completed=completed | already_completed,
         failed=permanently_failed | timed_out,
         quota_exhausted=quota_exhausted,
     )
+    logger.info(
+        "generate_artefacts result: completed=%s failed=%s quota_exhausted=%s",
+        sorted(result.completed),
+        sorted(result.failed),
+        sorted(result.quota_exhausted),
+    )
+    get_console().print("[bold green]Done.[/bold green]")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +841,7 @@ _DOWNLOAD_SPECS = [
 
 async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
     """Download all available artefacts from a notebook."""
+    logger.info("download_artefacts: notebook=%s output=%s", notebook_id, output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     async with await NotebookLMClient.from_storage() as client:
@@ -688,11 +851,15 @@ async def download_artefacts(notebook_id: str, output_dir: Path) -> None:
                 lambda lm=list_method: getattr(client.artifacts, lm)(notebook_id),
                 f"list {label}",
             )
+            logger.debug("[download] %s: found %d items", label, len(items) if items else 0)
             if not items:
                 continue
             # Skip failed artefacts — use upstream .is_completed property
             ready = [i for i in items if i.is_completed]
             if not ready:
+                logger.warning(
+                    "[download] %s: %d items exist but none completed", label, len(items)
+                )
                 get_console().print(
                     f"[yellow]⚠[/yellow] {label}: exists but not ready (failed or processing), skipping"
                 )

@@ -277,12 +277,11 @@ class GenerateStage:
         )
 
     def post_check(self, ctx: PipelineContext) -> StageResult:
-        all_done = all(ctx.state.artefacts.get(name) == "completed" for name in ARTEFACT_CONFIG)
+        target = ctx.artefact_selection or list(ARTEFACT_CONFIG)
+        all_done = all(ctx.state.artefacts.get(name) == "completed" for name in target)
         if all_done:
             return StageResult(Status.PASS)
-        missing = [
-            name for name in ARTEFACT_CONFIG if ctx.state.artefacts.get(name) != "completed"
-        ]
+        missing = [name for name in target if ctx.state.artefacts.get(name) != "completed"]
         return StageResult(Status.FAIL, f"Not all artefacts completed: {missing}")
 
 
@@ -504,9 +503,10 @@ class CleanupStage:
             return StageResult(Status.SKIP, "Keeping notebook")
         if not ctx.state.notebook_id:
             return StageResult(Status.SKIP, "No notebook to clean up")
-        # Only clean up if all artefacts completed (quota_exhausted counts as done)
+        # Only clean up if all targeted artefacts completed (quota_exhausted counts as done)
         acceptable = {"completed", "quota_exhausted"}
-        all_done = all(ctx.state.artefacts.get(name) in acceptable for name in ARTEFACT_CONFIG)
+        target = ctx.artefact_selection or list(ARTEFACT_CONFIG)
+        all_done = all(ctx.state.artefacts.get(name) in acceptable for name in target)
         if not all_done:
             return StageResult(
                 Status.SKIP,
@@ -590,21 +590,38 @@ def run_pipeline(
     resume: bool = False,
     timeout: int = 900,
     artefact_selection: list[str] | None = None,
+    notebook_id: str | None = None,
 ) -> bool:
     """Run the full artefact pipeline.
 
     Args:
         artefact_selection: If provided, only generate these artefact types.
             None means generate all types.
+        notebook_id: If provided, skip upload and use this existing notebook.
     """
     repo_path = repo_path.resolve()
     repo_name = _resolve_repo_name(repo_path)
     output_dir = repo_path / "docs" / "artefacts"
+    output_dir.mkdir(parents=True, exist_ok=True)
     state_path = output_dir / STATE_FILENAME
+
+    # Configure file logging for this pipeline run
+    log_path = output_dir / ".pipeline.log"
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    )
+    # Attach to the repo_artefacts root logger so all modules emit here
+    root_logger = logging.getLogger("repo_artefacts")
+    root_logger.setLevel(logging.DEBUG)
+    root_logger.addHandler(file_handler)
 
     # Load or create state
     state = PipelineState.load(state_path) if resume else PipelineState()
     state.repo_name = repo_name
+    if notebook_id:
+        state.notebook_id = notebook_id
     if not state.started_at:
         state.started_at = datetime.now(UTC).isoformat()
 
@@ -621,12 +638,26 @@ def run_pipeline(
         artefact_selection=artefact_selection,
     )
 
+    logger.info(
+        "Pipeline start: repo=%s store=%s timeout=%s artefacts=%s notebook_id=%s "
+        "resume=%s force_regen=%s dry_run=%s",
+        repo_name,
+        store_slug,
+        timeout,
+        artefact_selection,
+        notebook_id,
+        resume,
+        force_regen,
+        dry_run,
+    )
+
     console = get_console()
     console.print(f"\n[bold]Pipeline for {repo_name}[/bold]")
     if store_slug:
         console.print(f"  Store: [cyan]{store_slug}[/cyan]")
     if dry_run:
         console.print("  [yellow]DRY RUN — no changes will be made[/yellow]")
+    console.print(f"  Log: [dim]{log_path}[/dim]")
     console.print()
 
     pipeline_start = time.monotonic()
@@ -635,6 +666,7 @@ def run_pipeline(
     for stage in ALL_STAGES:
         console.rule(f"Stage: {stage.name}")
         stage_start = time.monotonic()
+        logger.info("Stage %s: starting", stage.name)
 
         # Dry run: skip pre-checks (previous stages didn't execute) and show plan
         if dry_run:
@@ -645,11 +677,13 @@ def run_pipeline(
         # Pre-check
         pre = stage.pre_check(ctx)
         if pre.status == Status.SKIP:
+            logger.info("Stage %s: skipped — %s", stage.name, pre.message)
             console.print(f"  [dim]Skipped: {pre.message}[/dim]")
             ctx.state.set_stage(stage.name, "skipped", reason=pre.message)
             ctx.save_state()
             continue
         if pre.status == Status.FAIL:
+            logger.error("Stage %s: pre-check FAILED — %s", stage.name, pre.message)
             console.print(f"  [red]Pre-check failed: {pre.message}[/red]")
             ctx.state.set_stage(stage.name, "failed", reason=pre.message)
             ctx.save_state()
@@ -660,6 +694,7 @@ def run_pipeline(
         try:
             result = stage.execute(ctx)
         except Exception as e:
+            logger.exception("Stage %s: execute raised %s", stage.name, e)
             console.print(f"  [red]Error: {e}[/red]")
             ctx.state.set_stage(stage.name, "error", error=str(e))
             ctx.save_state()
@@ -667,6 +702,9 @@ def run_pipeline(
             break
 
         if result.status == Status.FAIL:
+            logger.error(
+                "Stage %s: execute FAILED — %s data=%s", stage.name, result.message, result.data
+            )
             console.print(f"  [red]Failed: {result.message}[/red]")
             ctx.state.set_stage(stage.name, "failed", reason=result.message, **result.data)
             ctx.save_state()
@@ -676,6 +714,7 @@ def run_pipeline(
         # Post-check
         post = stage.post_check(ctx)
         if post.status == Status.FAIL:
+            logger.error("Stage %s: post-check FAILED — %s", stage.name, post.message)
             console.print(f"  [red]Post-check failed: {post.message}[/red]")
             ctx.state.set_stage(stage.name, "post_check_failed", reason=post.message)
             ctx.save_state()
@@ -684,6 +723,7 @@ def run_pipeline(
 
         # Metrics: track stage duration
         stage_duration = round(time.monotonic() - stage_start, 1)
+        logger.info("Stage %s: PASS in %.1fs — %s", stage.name, stage_duration, result.message)
         console.print(
             f"  [green]✓ {stage.name}: {result.message}[/green] [dim]({stage_duration}s)[/dim]"
         )
@@ -693,14 +733,20 @@ def run_pipeline(
     total_duration = round(time.monotonic() - pipeline_start, 1)
 
     if all_passed:
+        logger.info("Pipeline COMPLETE in %.1fs", total_duration)
         console.print(
             f"\n[bold green]Pipeline complete![/bold green] [dim]({total_duration}s)[/dim]"
         )
         _notify("repo-artefacts", f"Pipeline complete for {repo_name} ({total_duration}s)")
     else:
+        logger.error("Pipeline FAILED after %.1fs — state=%s", total_duration, state_path)
         console.print(f"\n[bold red]Pipeline failed.[/bold red] [dim]({total_duration}s)[/dim]")
         console.print(f"State saved to: {state_path}")
         console.print("Resume with: repo-artefacts pipeline --resume ...")
         _notify("repo-artefacts", f"Pipeline FAILED for {repo_name}")
+
+    console.print(f"  Log: [dim]{log_path}[/dim]")
+    root_logger.removeHandler(file_handler)
+    file_handler.close()
 
     return all_passed

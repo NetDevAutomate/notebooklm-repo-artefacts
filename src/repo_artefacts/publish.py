@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import time
 import urllib.error
@@ -11,6 +12,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from repo_artefacts.console import get_console
+
+logger = logging.getLogger(__name__)
 
 STANDARD_FILES = {
     "audio_overview.m4a": "audio",
@@ -69,6 +72,9 @@ def verify_pages(
 
     Returns (site_ok, verified_artefact_types).
     """
+    logger.info(
+        "verify_pages: url=%s max_wait=%ds artefacts=%s", url, max_wait, list(artefact_urls or {})
+    )
     get_console().print(f"\n[bold]Verifying[/bold] {url}")
     verified: set[str] = set()
     start = time.time()
@@ -193,11 +199,13 @@ def git_commit_and_push(
             get_console().print("  No changes to commit")
             return True
 
+        logger.info("git commit: %s", message)
         subprocess.run(
             ["git", "commit", "-m", message],
             cwd=repo_root,
             check=True,
         )
+        logger.info("git push: %s %s", remote, branch)
         subprocess.run(
             ["git", "push", remote, branch],
             cwd=repo_root,
@@ -206,5 +214,6 @@ def git_commit_and_push(
         get_console().print(f"[green]✓[/green] Pushed to {remote}/{branch}")
         return True
     except subprocess.CalledProcessError as e:
+        logger.error("git_commit_and_push failed: %s", e)
         get_console().print(f"[red]✗[/red] Git failed: {e}")
         return False

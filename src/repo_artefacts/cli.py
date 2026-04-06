@@ -478,6 +478,7 @@ def pipeline(
         resume=resume,
         timeout=timeout,
         artefact_selection=artefact_selection,
+        notebook_id=notebook_id,
     )
 
     if not ok:
