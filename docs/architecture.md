@@ -1,310 +1,372 @@
-# Architecture Deep Dive
+# Architecture — notebooklm-repo-artefacts v0.1.0
 
-> Educational reference for understanding the repo-artefacts codebase.
-> Includes diagrams, code patterns, and design rationale.
+> Comprehensive reference for developers new to this codebase.
+> Covers every layer, module, and key design decision with diagrams and source-grounded examples.
 
 ---
 
 ## Table of Contents
 
-1. [System Overview](#1-system-overview)
-2. [Pipeline Architecture](#2-pipeline-architecture)
-3. [Stage Design Pattern](#3-stage-design-pattern)
-4. [Module Relationships](#4-module-relationships)
-5. [Data Flow](#5-data-flow)
-6. [State Persistence](#6-state-persistence)
-7. [Error Handling Strategy](#7-error-handling-strategy)
-8. [Testing Strategy](#8-testing-strategy)
-9. [Design Patterns Used](#9-design-patterns-used)
-10. [Collector Architecture](#10-collector-architecture)
-11. [Notebook Lifecycle Management](#11-notebook-lifecycle-management)
-12. [Retry and Timeout Strategy](#12-retry-and-timeout-strategy)
-13. [Target Architecture Improvements](#13-target-architecture-improvements)
+1. [Executive Summary](#1-executive-summary)
+2. [System Overview](#2-system-overview)
+3. [Architectural Layers](#3-architectural-layers)
+4. [Deep Dive: Pipeline Architecture](#4-deep-dive-pipeline-architecture)
+5. [Deep Dive: NotebookLM Integration](#5-deep-dive-notebooklm-integration)
+6. [Deep Dive: Content Collection](#6-deep-dive-content-collection)
+7. [Deep Dive: Publishing](#7-deep-dive-publishing)
+8. [Deep Dive: Error Handling](#8-deep-dive-error-handling)
+9. [Module Interface Reference](#9-module-interface-reference)
+10. [External Dependencies](#10-external-dependencies)
+11. [Design Decisions](#11-design-decisions)
 
 ---
 
-## 1. System Overview
+## 1. Executive Summary
 
-### What This Tool Does
+`notebooklm-repo-artefacts` is a Python CLI tool that transforms any git repository into a set of AI-generated learning artefacts — audio overview, video explainer, slide deck, and infographic — using Google NotebookLM as the generation engine.
 
+The tool collects the key content from a repository (README, documentation, configuration, source code), renders it to PDF, uploads it to NotebookLM, triggers parallel artefact generation, downloads the results, and publishes them to GitHub Pages.
+
+**Key architectural qualities:**
+
+- **Resumability.** The pipeline persists state to `.pipeline-state.json` after every stage. A failed run can be restarted from the last successful stage with `--resume`, avoiding redundant API calls.
+- **Retry resilience.** NotebookLM API calls are wrapped in a retry layer that handles auth expiry, rate limiting, and transient RPC errors with differentiated backoff strategies.
+- **Two publish modes.** Artefacts can be committed directly to the source repository's `docs/artefacts/` directory (local mode, served by the repo's own GitHub Pages), or pushed to a separate centralised artefact store repository (store mode, keeping binary files out of source history).
+
+---
+
+## 2. System Overview
+
+### End-to-End Flow
+
+```mermaid
+flowchart TD
+    A[("Git Repository")] --> B["Content Collection\ncollector.py"]
+    B --> C["PDF Rendering\nmd2pdf-mermaid"]
+    C --> D["NotebookLM Upload\nnotebooklm.py"]
+    D --> E["Artefact Generation\n(concurrent, with retry)"]
+
+    E --> F["Audio Overview\n.mp3"]
+    E --> G["Video Explainer\n.mp4"]
+    E --> H["Slide Deck\n.pdf"]
+    E --> I["Infographic\n.png"]
+
+    F --> J["Download\nnotebooklm.py"]
+    G --> J
+    H --> J
+    I --> J
+
+    J --> K{"Publish Mode?"}
+
+    K -->|"--store Org/repo"| L["Clone Store Repo\nstore.py"]
+    K -->|"local (default)"| M["Setup GitHub Pages\npages.py"]
+
+    L --> N["Copy Artefacts + Update manifest.json"]
+    N --> O["Commit + Push Store"]
+    O --> P["Update Source README\nwith store links"]
+
+    M --> Q["Write index.html Player\nCommit + Push Source Repo"]
+
+    P --> R[("GitHub Pages\n(store repo)")]
+    Q --> S[("GitHub Pages\n(source repo)")]
+
+    R --> T["Verify URLs live\npublish.py"]
+    S --> T
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        repo-artefacts CLI                           │
-│                                                                     │
-│  Input: Any git repository                                          │
-│  Output: Audio, Video, Slides, Infographic artefacts via NotebookLM │
-│  Publish: GitHub Pages or centralised artefact store                │
-└─────────────────────────────────────────────────────────────────────┘
-```
 
-### High-Level Component Diagram
+### Component Responsibilities at a Glance
 
 ```mermaid
 graph TB
-    subgraph "CLI Layer"
-        CLI[cli.py<br/>Typer commands]
+    subgraph "User Entry Point"
+        CLI["cli.py\n11 commands"]
     end
 
-    subgraph "Orchestration Layer"
-        PIPELINE[pipeline.py<br/>Stage runner]
-        PUBLISH[publish.py<br/>Legacy orchestrator]
+    subgraph "Orchestration"
+        PIPE["pipeline.py\nStage runner + state"]
+        PUB["publish.py\nLegacy orchestrator"]
     end
 
-    subgraph "Domain Layer"
-        COLLECTOR[collector.py<br/>Content collection]
-        NOTEBOOKLM[notebooklm.py<br/>NotebookLM API]
-        PAGES[pages.py<br/>GitHub Pages setup]
-        STORE[store.py<br/>Artefact store ops]
+    subgraph "Domain Logic"
+        COL["collector.py\nFile collection + PDF"]
+        NLM["notebooklm.py\nAPI lifecycle"]
+        PAG["pages.py\nGitHub Pages + tokens"]
+        STO["store.py\nArtefact store CRUD"]
     end
 
-    subgraph "Infrastructure Layer"
-        CONFIG[config.py<br/>User config]
-        EXCEPTIONS[exceptions.py<br/>Domain exceptions]
-        CONSOLE[console.py<br/>Rich output]
+    subgraph "Infrastructure"
+        CFG["config.py\nTOML config"]
+        CON["console.py\nRich singleton"]
+        EXC["exceptions.py\nException hierarchy"]
     end
 
-    CLI --> PIPELINE
-    CLI --> PUBLISH
-    PIPELINE --> COLLECTOR
-    PIPELINE --> NOTEBOOKLM
-    PIPELINE --> STORE
-    PUBLISH --> NOTEBOOKLM
-    PUBLISH --> PAGES
-    PUBLISH --> STORE
+    CLI --> PIPE
+    CLI --> PUB
+    PIPE --> COL
+    PIPE --> NLM
+    PIPE --> STO
+    PIPE --> PAG
+    PUB --> NLM
+    PUB --> PAG
+    PUB --> STO
 
-    COLLECTOR --> CONSOLE
-    NOTEBOOKLM --> CONSOLE
-    PAGES --> CONSOLE
-    STORE --> CONSOLE
+    COL --> CON
+    COL --> EXC
+    NLM --> CON
+    PAG --> CON
+    PAG --> EXC
+    STO --> CON
+    STO --> CFG
+    STO --> EXC
 
-    CLI --> CONFIG
-    STORE --> CONFIG
-    PAGES --> CONFIG
-
-    COLLECTOR --> EXCEPTIONS
-    STORE --> EXCEPTIONS
-    PAGES --> EXCEPTIONS
+    CLI --> CFG
+    CLI --> EXC
 ```
-
-### Why This Layering?
-
-**Teaching moment**: Layered architecture separates concerns so each layer has a single responsibility. The CLI layer handles user input/output, the orchestration layer coordinates workflow, the domain layer contains business logic, and the infrastructure layer provides shared utilities. This means you can swap out the CLI (e.g., build a web interface) without touching domain logic.
 
 ---
 
-## 2. Pipeline Architecture
+## 3. Architectural Layers
 
-### The Stage-Based Pipeline
+The system has four layers with a strict downward dependency direction: CLI depends on Orchestration, which depends on Domain, which depends on Infrastructure. No layer imports from a layer above it.
 
-The pipeline is the recommended entry point. It runs 9 stages sequentially, each with three gates:
+```mermaid
+graph TD
+    subgraph L1["Layer 1 — CLI Interface"]
+        CLI["cli.py"]
+    end
+    subgraph L2["Layer 2 — Orchestration"]
+        PIPE["pipeline.py"]
+        PUB["publish.py"]
+    end
+    subgraph L3["Layer 3 — Domain Logic"]
+        COL["collector.py"]
+        NLM["notebooklm.py"]
+        PAG["pages.py"]
+        STO["store.py"]
+    end
+    subgraph L4["Layer 4 — Infrastructure"]
+        CFG["config.py"]
+        CON["console.py"]
+        EXC["exceptions.py"]
+    end
+
+    L1 --> L2
+    L1 --> L3
+    L2 --> L3
+    L3 --> L4
+
+    style L1 fill:#dbeafe
+    style L2 fill:#fef9c3
+    style L3 fill:#dcfce7
+    style L4 fill:#f3e8ff
+```
+
+### Layer 1 — CLI Interface (`cli.py`)
+
+The entry point for all user interaction. Provides 11 Typer commands:
+
+| Command | Purpose |
+|---------|---------|
+| `pipeline` | Recommended path. Full end-to-end run with stage-based state machine. |
+| `publish` | Legacy orchestrator. Generates, sets up Pages, pushes, verifies. |
+| `process` | Collect repo content and upload to NotebookLM only. |
+| `generate` | Trigger artefact generation on an existing notebook. |
+| `download` | Download completed artefacts from a notebook. |
+| `list` | List all notebooks, or sources within a notebook. |
+| `delete` | Delete a notebook and its contents. |
+| `pages` | Set up GitHub Pages player for an existing artefacts directory. |
+| `migrate` | Move artefacts from source repo to the artefact store. |
+| `validate` | Check that artefact URLs in README are reachable. |
+| `clean` | Find and optionally remove orphaned artefacts in the store. |
+
+The `_handle_errors` decorator applied to most commands catches `RepoArtefactsError` and translates it to `typer.Exit(1)` with a red error message, keeping domain exceptions out of the user-facing output:
+
+```python
+def _handle_errors(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except RepoArtefactsError as exc:
+            get_console().print(f"[red]Error:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+    return wrapper
+```
+
+Entry point registered in `pyproject.toml`:
+
+```toml
+[project.scripts]
+repo-artefacts = "repo_artefacts.cli:app"
+```
+
+### Layer 2 — Orchestration (`pipeline.py`, `publish.py`)
+
+**`pipeline.py`** is the recommended orchestration path. It implements a stage-based runner with 9 stages, state persistence to JSON, and `--resume` support. Each stage follows a pre-check → execute → post-check gateway pattern. State is written to disk after every stage, enabling recovery from any failure point.
+
+**`publish.py`** is the legacy orchestrator kept for backward compatibility. It provides three utility functions also used by the pipeline: `check_artefacts`, `verify_pages`, and `git_commit_and_push`. The `publish` CLI command invokes these directly for a simpler, less-resumable workflow.
+
+The pipeline is the preferred path for new usage. The `publish` command is retained for cases where the stage-based overhead is unwanted.
+
+### Layer 3 — Domain Logic
+
+**`collector.py`** scans a git repository using 6 priority-based `CollectionPattern` rules, collects matching files up to a 700 KB size budget, and renders the combined markdown to PDF using md2pdf-mermaid.
+
+**`notebooklm.py`** manages the full NotebookLM lifecycle: creating notebooks, uploading sources, triggering concurrent generation with retry, polling for completion, and downloading results. All API calls pass through the `_with_reauth()` retry wrapper.
+
+**`pages.py`** handles GitHub Pages configuration: writing the HTML player page from a template, injecting artefact links into README.md, enabling GitHub Pages via the GitHub API, and resolving the `GITHUB_TOKEN` from multiple sources.
+
+**`store.py`** manages the centralised artefact store: shallow cloning the store repository, copying artefacts and generating the player page, updating `manifest.json`, and pushing with conflict retry.
+
+### Layer 4 — Infrastructure (`config.py`, `console.py`, `exceptions.py`)
+
+**`config.py`** loads and saves user configuration from `~/.config/repo-artefacts/config.toml`. The `Config` dataclass holds three settings:
+
+```python
+@dataclass
+class Config:
+    default_store: str | None = None        # e.g., "Org/artefact-store"
+    default_timeout: int = 900              # seconds per artefact
+    store_cache_dir: Path = ...             # ~/.cache/repo-artefacts/stores
+```
+
+**`console.py`** provides a shared `rich.Console` singleton. All modules call `get_console()` rather than creating their own instances, allowing future `--quiet` support without touching domain code.
+
+**`exceptions.py`** defines the domain exception hierarchy. `StoreError` is defined in `store.py` rather than `exceptions.py` because it is only raised there; it still inherits from `RepoArtefactsError`.
+
+---
+
+## 4. Deep Dive: Pipeline Architecture
+
+### The 9 Stages
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CollectStage
+    [*] --> collect
 
-    state CollectStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]: PASS
-        post_check --> [*]: FAIL
+    state collect {
+        pre : pre_check\n(repo exists,\nis git repo)
+        exec : execute\n(scan files,\nrender PDF)
+        post : post_check\n(PDF exists,\nnon-empty)
+        [*] --> pre
+        pre --> exec : PASS
+        pre --> [*] : FAIL / SKIP
+        exec --> post : result
+        post --> [*]
     }
 
-    CollectStage --> UploadStage: PASS
-    CollectStage --> [*]: FAIL/SKIP
+    collect --> upload : PASS
+    collect --> [*] : FAIL
 
-    state UploadStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]: PASS
-        post_check --> [*]: FAIL
+    state upload {
+        pre2 : pre_check\n(PDF exists,\nhash unchanged?)
+        exec2 : execute\n(delete old notebook,\ncreate new, upload)
+        post2 : post_check\n(notebook_id set)
+        [*] --> pre2
+        pre2 --> exec2 : PASS
+        pre2 --> [*] : SKIP (hash match)
+        exec2 --> post2
+        post2 --> [*]
     }
 
-    UploadStage --> GenerateStage: PASS
-    UploadStage --> [*]: FAIL/SKIP
+    upload --> generate : PASS / SKIP
+    upload --> [*] : FAIL
 
-    state GenerateStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]: PASS
-        post_check --> [*]: FAIL
+    state generate {
+        pre3 : pre_check\n(notebook_id set)
+        exec3 : execute\n(concurrent generation\nwith retry)
+        post3 : post_check\n(all targets completed)
+        [*] --> pre3
+        pre3 --> exec3 : PASS
+        exec3 --> post3
+        post3 --> [*]
     }
 
-    GenerateStage --> DownloadStage: PASS
-    GenerateStage --> [*]: FAIL/SKIP
+    generate --> download : PASS
+    generate --> [*] : FAIL
 
-    state DownloadStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]: PASS
-        post_check --> [*]: FAIL
+    state download {
+        pre4 : pre_check\n(notebook_id,\ncompleted exist)
+        exec4 : execute\n(download all\ncompleted artefacts)
+        post4 : post_check\n(files on disk)
+        [*] --> pre4
+        pre4 --> exec4 : PASS
+        exec4 --> post4
+        post4 --> [*]
     }
 
-    DownloadStage --> PublishBranch
-    DownloadStage --> LocalPublishBranch
+    download --> mode_branch : PASS
+    download --> [*] : FAIL
 
-    state PublishBranch <<choice>>
-    state LocalPublishBranch <<choice>>
+    state mode_branch <<choice>>
+    mode_branch --> publish : store_slug set
+    mode_branch --> local_publish : no store_slug
 
-    PublishBranch --> PublishStage: store_slug set
-    PublishBranch --> [*]: no store
+    publish --> verify : PASS
+    verify --> readme : PASS
+    readme --> cleanup
 
-    state PublishStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
+    local_publish --> local_verify : PASS
+    local_verify --> cleanup
 
-    PublishStage --> VerifyStage
-
-    state VerifyStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
-
-    VerifyStage --> ReadmeStage
-
-    state ReadmeStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
-
-    ReadmeStage --> CleanupStage
-
-    LocalPublishBranch --> LocalPublishStage: no store_slug
-    LocalPublishBranch --> [*]: store set
-
-    state LocalPublishStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
-
-    LocalPublishStage --> LocalVerifyStage
-
-    state LocalVerifyStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
-
-    LocalVerifyStage --> CleanupStage
-
-    state CleanupStage {
-        [*] --> pre_check
-        pre_check --> execute: PASS
-        pre_check --> [*]: FAIL/SKIP
-        execute --> post_check
-        post_check --> [*]
-    }
-
-    CleanupStage --> [*]
+    cleanup --> [*] : done
 ```
 
-### Simplified Pipeline Flow (Linear View)
+### Stage Gateway Pattern
 
-```mermaid
-flowchart LR
-    A[Collect] --> B[Upload]
-    B --> C[Generate]
-    C --> D[Download]
-    D --> E{Store?}
-    E -->|Yes| F[Publish to Store]
-    E -->|No| G[Local Publish]
-    F --> H[Verify Store]
-    G --> I[Verify Local]
-    H --> J[Update README]
-    J --> K[Cleanup]
-    I --> K
-    K --> L((Done))
-
-    style A fill:#e1f5fe
-    style B fill:#e1f5fe
-    style C fill:#e1f5fe
-    style D fill:#e1f5fe
-    style F fill:#fff3e0
-    style G fill:#fff3e0
-    style H fill:#e8f5e9
-    style I fill:#e8f5e9
-    style J fill:#fff3e0
-    style K fill:#fce4ec
-    style L fill:#f3e5f5
-```
-
-**Color key**:
-- 🔵 Blue = Content processing (collect, upload, generate, download)
-- 🟠 Orange = Publishing (store or local)
-- 🟢 Green = Verification
-- 🟡 Yellow = Metadata updates (README)
-- 🔴 Pink = Cleanup
-- 🟣 Purple = Terminal state
-
-### Each Stage Has Three Gates
+Every stage implements the same three-phase interface without a formal base class (duck typing):
 
 ```python
-# pipeline.py — the gate pattern
 class CollectStage:
     name = "collect"
 
     def pre_check(self, ctx: PipelineContext) -> StageResult:
-        """Validate prerequisites BEFORE execution."""
+        """Validate prerequisites. Return SKIP to bypass this stage,
+        FAIL to stop the pipeline, PASS to proceed to execute."""
         if not ctx.repo_path.exists():
-            return StageResult(Status.FAIL, "Repo path does not exist")
+            return StageResult(Status.FAIL, f"Repo path does not exist: {ctx.repo_path}")
         if not (ctx.repo_path / ".git").is_dir():
-            return StageResult(Status.FAIL, "Not a git repo")
+            return StageResult(Status.FAIL, f"Not a git repo: {ctx.repo_path}")
         return StageResult(Status.PASS)
 
     def execute(self, ctx: PipelineContext) -> StageResult:
-        """Do the actual work. Return PASS/FAIL/SKIP."""
-        ctx.output_dir.mkdir(parents=True, exist_ok=True)
-        md_path = ctx.output_dir / f"{ctx.state.repo_name}_content.md"
-        collect_repo_content(ctx.repo_path, md_path)
-        pdf_path = render_to_pdf(md_path)
-        ctx.pdf_path = pdf_path
-        return StageResult(Status.PASS, f"Collected {pdf_path.stat().st_size / 1024:.1f} KB")
+        """Do the work. Mutate ctx to pass information to downstream stages."""
+        ...
 
     def post_check(self, ctx: PipelineContext) -> StageResult:
-        """Validate outcomes AFTER execution."""
+        """Verify the outcome. Called only if execute returned PASS."""
         if ctx.pdf_path and ctx.pdf_path.exists() and ctx.pdf_path.stat().st_size > 0:
             return StageResult(Status.PASS)
         return StageResult(Status.FAIL, "PDF not created or empty")
 ```
 
-**Teaching moment**: This is the **Gateway Pattern** (also called **Validation Gate Pattern**). Each stage has three phases:
-1. **Pre-check**: "Do we have everything we need to run?" — validates inputs, prerequisites, skip conditions
-2. **Execute**: "Do the work" — performs the actual operation
-3. **Post-check**: "Did the work succeed?" — validates outputs, side effects, invariants
+`StageResult` carries a status, an optional human-readable message, and an optional data dict that is merged into the persisted stage state:
 
-This pattern makes failures easy to diagnose because you know exactly which phase failed and why. It also enables the `--resume` feature — if a stage's pre-check passes but execute hasn't run, you know where to resume from.
+```python
+class Status(StrEnum):
+    PASS = "pass"
+    FAIL = "fail"
+    SKIP = "skip"
+    RETRY = "retry"   # reserved for future use
+
+@dataclass
+class StageResult:
+    status: Status
+    message: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+```
+
+`StrEnum` is used so values serialize to JSON strings directly (e.g., `"pass"` rather than `Status.PASS`), which matters because stage state is written to `.pipeline-state.json` after each stage.
 
 ### The Runner Loop
 
+The runner in `run_pipeline()` iterates `ALL_STAGES` and applies the gateway sequence. Fail-fast: on the first failure, state is persisted and the loop breaks.
+
 ```python
-# pipeline.py:635-691 — simplified runner
 for stage in ALL_STAGES:
-    # Dry run: skip everything
-    if dry_run:
-        console.print(f"  [dim]Would execute: {stage.name}[/dim]")
-        ctx.state.set_stage(stage.name, "dry_run")
+    # Resume: stages that already have "pass" status are skipped immediately
+    if resume and ctx.state.stage_status(stage.name) == "pass":
+        console.print("  [dim]Already passed — skipping (resume)[/dim]")
         continue
 
     # Gate 1: Pre-check
@@ -317,7 +379,7 @@ for stage in ALL_STAGES:
         ctx.state.set_stage(stage.name, "failed", reason=pre.message)
         ctx.save_state()
         all_passed = False
-        break  # ← Stop the pipeline on first failure
+        break  # stop pipeline
 
     # Gate 2: Execute
     try:
@@ -329,7 +391,7 @@ for stage in ALL_STAGES:
         break
 
     if result.status == Status.FAIL:
-        ctx.state.set_stage(stage.name, "failed", reason=result.message)
+        ctx.state.set_stage(stage.name, "failed", reason=result.message, **result.data)
         ctx.save_state()
         all_passed = False
         break
@@ -342,429 +404,147 @@ for stage in ALL_STAGES:
         all_passed = False
         break
 
-    # Success: record and persist
-    ctx.state.set_stage(stage.name, "pass", **result.data)
+    # Success: record with duration, persist, continue
+    stage_duration = round(time.monotonic() - stage_start, 1)
+    ctx.state.set_stage(stage.name, "pass", duration_s=stage_duration, **result.data)
     ctx.save_state()
 ```
 
-**Teaching moment**: Notice the `break` on every failure path. This is **fail-fast** behaviour — the pipeline stops at the first problem rather than continuing and potentially causing cascading failures. The state is persisted after every stage, so `--resume` can pick up exactly where it left off.
+### State Persistence and Resume
 
----
-
-## 3. Stage Design Pattern
-
-### The Stage Protocol
-
-Every stage implements the same interface (a **protocol** in Python typing terms):
-
-```python
-# Implicit protocol — all stages must have these:
-class StageProtocol(Protocol):
-    name: str
-
-    def pre_check(self, ctx: PipelineContext) -> StageResult: ...
-    def execute(self, ctx: PipelineContext) -> StageResult: ...
-    def post_check(self, ctx: PipelineContext) -> StageResult: ...
-```
-
-**Teaching moment**: Python doesn't enforce interfaces like Java or TypeScript. Instead, it uses **duck typing** — "if it walks like a duck and quacks like a duck, it's a duck." The `ALL_STAGES` list works because every stage class has `name`, `pre_check`, `execute`, and `post_check`. You could add a formal `Protocol` from `typing` for IDE support, but it's not required for runtime correctness.
-
-### Stage Result Types
-
-```python
-class Status(StrEnum):
-    PASS = "pass"       # Gate succeeded
-    FAIL = "fail"       # Gate failed — pipeline stops
-    SKIP = "skip"       # Conditionally skipped — pipeline continues
-    RETRY = "retry"     # Transient failure — could retry (not yet used)
-
-
-@dataclass
-class StageResult:
-    status: Status
-    message: str = ""
-    data: dict[str, Any] = field(default_factory=dict)
-```
-
-**Teaching moment**: Using `StrEnum` instead of plain `Enum` means the values serialize to JSON as strings automatically (`"pass"` not `Status.PASS`). This is important because `PipelineState` saves to JSON. The `data` dict carries stage-specific information (file paths, notebook IDs, URLs) that downstream stages or the resume mechanism might need.
-
-### Stage Dependency Diagram
-
-```mermaid
-graph TD
-    CollectStage -->|produces pdf_path| UploadStage
-    UploadStage -->|produces notebook_id| GenerateStage
-    GenerateStage -->|produces artefacts dict| DownloadStage
-    DownloadStage -->|artefacts on disk| PublishBranch
-    DownloadStage -->|artefacts on disk| LocalPublishBranch
-
-    PublishBranch -->|store_slug set| PublishStage
-    PublishStage -->|store_path| VerifyStage
-    VerifyStage -->|verified URLs| ReadmeStage
-    ReadmeStage -->|README updated| CleanupStage
-
-    LocalPublishBranch -->|no store_slug| LocalPublishStage
-    LocalPublishStage -->|pages URL| LocalVerifyStage
-    LocalVerifyStage -->|verified URLs| CleanupStage
-
-    CleanupStage -->|notebook_id| DeleteNotebook
-```
-
----
-
-## 4. Module Relationships
-
-### Import Dependency Graph
-
-```mermaid
-graph TD
-    cli --> pipeline
-    cli --> collector
-    cli --> notebooklm
-    cli --> pages
-    cli --> publish
-    cli --> store
-    cli --> config
-    cli --> console
-    cli --> exceptions
-
-    pipeline --> collector
-    pipeline --> notebooklm
-    pipeline --> store
-    pipeline --> pages
-    pipeline --> publish
-    pipeline --> console
-
-    publish --> console
-    pages --> console
-    store --> console
-    store --> config
-    store --> publish
-    store --> exceptions
-
-    collector --> console
-    collector --> exceptions
-
-    notebooklm --> console
-
-    config -.->|no imports from domain layer| console
-    exceptions -.->|no imports| console
-```
-
-**Teaching moment**: Notice the **dependency direction**. The CLI layer depends on everything (it's the entry point). The domain layer modules (`collector`, `notebooklm`, `pages`, `store`) depend on infrastructure (`console`, `exceptions`, `config`) but NOT on each other — except `store` which depends on `publish` for `check_artefacts()`. This is mostly a **clean architecture** pattern where dependencies point inward. The `store → publish` dependency is a minor violation that could be fixed by moving `check_artefacts()` to a shared utilities module.
-
-### Module Responsibility Matrix
-
-| Module | Responsibility | Depends On | Used By |
-|--------|---------------|------------|---------|
-| `cli.py` | User interface, argument parsing, command routing | All modules | User |
-| `pipeline.py` | Stage orchestration, state persistence, resume logic | collector, notebooklm, store, pages, publish | cli |
-| `collector.py` | Scan git repo, collect files, render PDF | console, exceptions | cli, pipeline |
-| `notebooklm.py` | NotebookLM API: upload, generate, download, manage | console, upstream `notebooklm-py` | cli, pipeline |
-| `pages.py` | GitHub Pages setup, README injection, token resolution | console, config | cli, pipeline, publish |
-| `store.py` | Artefact store: clone, publish, manifest, cleanup | console, config, publish, exceptions | cli, pipeline |
-| `publish.py` | Artefact checking, page verification, git commit/push | console | cli, pipeline, store |
-| `config.py` | User config load/save | None | cli, pages, store |
-| `exceptions.py` | Domain exception hierarchy | None | cli, collector, store |
-| `console.py` | Shared Rich console singleton | rich | All modules |
-
----
-
-## 5. Data Flow
-
-### End-to-End Data Flow
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant CLI
-    participant Pipeline
-    participant Collector
-    participant NotebookLM
-    participant Store
-    participant GitHub
-
-    User->>CLI: repo-artefacts pipeline
-    CLI->>Pipeline: run_pipeline(repo_path, store_slug)
-
-    Pipeline->>Pipeline: Load/resume state
-    Pipeline->>Collector: collect_repo_content(repo_path)
-    Collector-->>Pipeline: markdown file
-    Pipeline->>Collector: render_to_pdf(markdown)
-    Collector-->>Pipeline: PDF file
-
-    Pipeline->>NotebookLM: upload_repo(pdf, repo_name)
-    NotebookLM-->>Pipeline: notebook_id
-
-    Pipeline->>NotebookLM: generate_artefacts(notebook_id, types)
-    NotebookLM-->>Pipeline: GenerateResult{completed, failed}
-
-    Pipeline->>NotebookLM: download_artefacts(notebook_id, output_dir)
-    NotebookLM-->>Pipeline: artefacts on disk
-
-    alt store_slug is set
-        Pipeline->>Store: clone_or_pull_store(store_slug)
-        Store-->>Pipeline: local store path
-        Pipeline->>Store: publish_to_store(store_path, repo_name, artefacts)
-        Store-->>Pipeline: base URL
-        Pipeline->>Store: commit_and_push_store(store_path)
-        Store->>GitHub: git push
-        Pipeline->>Store: verify artefacts live
-    else no store
-        Pipeline->>GitHub: setup_pages(repo_path, org, repo)
-        Pipeline->>GitHub: git_commit_and_push(repo_path)
-        Pipeline->>GitHub: verify_pages(url)
-    end
-
-    Pipeline->>Pipeline: save state
-    Pipeline-->>CLI: success/failure
-    CLI-->>User: output + notification
-```
-
-### Artefact Data Flow
-
-```mermaid
-flowchart TD
-    A[Git Repository] -->|scan files| B[Collector]
-    B -->|combined markdown| C[PDF Renderer]
-    C -->|PDF file| D[NotebookLM Upload]
-    D -->|notebook with source| E[Artefact Generation]
-
-    E -->|async| F[Audio Overview]
-    E -->|async| G[Video Explainer]
-    E -->|async| H[Slide Deck]
-    E -->|async| I[Infographic]
-
-    F -->|poll until ready| J[Download]
-    G -->|poll until ready| J
-    H -->|poll until ready| J
-    I -->|poll until ready| J
-
-    J -->|files on disk| K{Publish mode?}
-    K -->|store| L[Clone store repo]
-    K -->|local| M[Setup GitHub Pages]
-
-    L -->|copy artefacts| N[Update manifest.json]
-    N -->|git commit + push| O[Store GitHub Pages]
-
-    M -->|git commit + push| P[Source repo GitHub Pages]
-
-    O -->|verify HTTP| Q[Live artefact URLs]
-    P -->|verify HTTP| Q
-
-    Q -->|update README| R[Source repo README.md]
-```
-
----
-
-## 6. State Persistence
-
-### Pipeline State JSON Structure
+State is written to `docs/artefacts/.pipeline-state.json`. The structure carries everything needed to resume:
 
 ```json
 {
   "repo_name": "my-project",
   "notebook_id": "abc123def456",
   "content_hash": "e3b0c44298fc1c149afbf4c8996fb924...",
-  "source_replaced": true,
+  "source_replaced": false,
   "stages": {
     "collect": {
       "status": "pass",
-      "at": "2026-04-04T10:30:00+00:00",
+      "at": "2026-04-07T10:30:00+00:00",
       "duration_s": 3.2,
       "pdf_path": "/path/to/docs/artefacts/my-project_content.pdf",
       "content_hash": "e3b0c44298fc..."
     },
     "upload": {
       "status": "pass",
-      "at": "2026-04-04T10:30:05+00:00",
+      "at": "2026-04-07T10:30:05+00:00",
       "duration_s": 5.1,
       "notebook_id": "abc123def456",
-      "source_replaced": true
+      "source_replaced": false,
+      "content_hash": "e3b0c44298fc..."
     },
     "generate": {
-      "status": "pass",
-      "at": "2026-04-04T10:35:00+00:00",
-      "duration_s": 295.0,
-      "completed": ["audio", "video", "slides", "infographic"]
+      "status": "failed",
+      "at": "2026-04-07T10:40:00+00:00",
+      "reason": "Failed: infographic. Completed: audio, slides, video"
     }
   },
   "artefacts": {
     "audio": "completed",
     "video": "completed",
     "slides": "completed",
-    "infographic": "quota_exhausted"
+    "infographic": "failed"
   },
-  "started_at": "2026-04-04T10:29:55+00:00",
-  "updated_at": "2026-04-04T10:35:00+00:00"
+  "started_at": "2026-04-07T10:29:55+00:00",
+  "updated_at": "2026-04-07T10:40:00+00:00"
 }
 ```
 
-### State Machine Diagram
+On `--resume`, the runner first checks whether a stage already has `"pass"` status and skips it immediately. Each stage's `pre_check` also carries skip logic: `UploadStage.pre_check` compares the current PDF content hash against the stored hash; if they match and a `notebook_id` exists, it returns `SKIP` rather than re-uploading the same content.
 
-```mermaid
-stateDiagram-v2
-    [*] --> NewPipeline
+### Mutual Exclusion of Publish Modes
 
-    NewPipeline --> Collecting: start
-    Collecting --> Collected: pass
-    Collecting --> Failed: fail
-
-    Collected --> Uploading: start
-    Uploading --> Uploaded: pass
-    Uploading --> Skipped: content unchanged
-    Uploading --> Failed: fail
-
-    Uploaded --> Generating: start
-    Generating --> Generated: pass
-    Generating --> Failed: fail
-
-    Generated --> Downloading: start
-    Downloading --> Downloaded: pass
-    Downloading --> Failed: fail
-
-    Downloaded --> Publishing: start (store mode)
-    Downloaded --> LocalPublishing: start (local mode)
-
-    Publishing --> Published: pass
-    Publishing --> Failed: fail
-
-    LocalPublishing --> LocalPublished: pass
-    LocalPublishing --> Failed: fail
-
-    Published --> Verifying: start
-    LocalPublished --> LocalVerifying: start
-
-    Verifying --> Verified: pass
-    Verifying --> Failed: fail
-
-    LocalVerifying --> LocalVerified: pass
-    LocalVerifying --> Failed: fail
-
-    Verified --> UpdatingReadme: start (store mode)
-    LocalVerified --> CleaningUp: start (local mode)
-
-    UpdatingReadme --> ReadmeUpdated: pass
-    UpdatingReadme --> Skipped: no README
-
-    ReadmeUpdated --> CleaningUp: start
-    CleaningUp --> CleanedUp: pass
-    CleaningUp --> Skipped: keep notebook
-
-    CleanedUp --> [*]: Success
-    Skipped --> [*]: Partial success
-    Failed --> [*]: Failure (resume possible)
-```
-
-### Resume Logic
+`PublishStage` and `LocalPublishStage` (and their corresponding verify stages) are mutually exclusive at the pre-check level. Each inspects `ctx.store_slug`:
 
 ```python
-# How --resume works:
-# 1. Load previous state from .pipeline-state.json
-# 2. For each stage, check if it already has a "pass" status
-# 3. If yes, the pre_check will SKIP it (content hash match, notebook exists, etc.)
-# 4. If no, the stage runs normally
+class PublishStage:
+    def pre_check(self, ctx: PipelineContext) -> StageResult:
+        if not ctx.store_slug:
+            return StageResult(Status.SKIP, "No store configured")
+        ...
 
-# Example: resume after generate failure
-# State shows: collect=pass, upload=pass, generate=failed
-# On resume:
-#   - collect: pre_check passes, but upload already has notebook_id → could skip
-#   - upload: pre_check sees content_hash match → SKIP
-#   - generate: pre_check passes (notebook_id exists) → RUN
-#   - download+: run normally
+class LocalPublishStage:
+    def pre_check(self, ctx: PipelineContext) -> StageResult:
+        if ctx.store_slug:
+            return StageResult(Status.SKIP, "Store mode — skipping local publish")
+        ...
 ```
 
-**Teaching moment**: The resume mechanism doesn't explicitly skip stages by checking the state file in the runner. Instead, each stage's `pre_check` method encodes the logic for whether it should run. For example, `UploadStage.pre_check` compares the current PDF's content hash against the stored hash — if they match, it returns `SKIP`. This is **decentralised skip logic** — each stage decides for itself whether it needs to run. The alternative would be **centralised skip logic** in the runner, which would need to know the internals of every stage.
+All 9 stages are always in `ALL_STAGES`. The publish mode selection happens through skip gates, not through building a different stage list.
 
 ---
 
-## 7. Error Handling Strategy
+## 5. Deep Dive: NotebookLM Integration
 
-### Exception Hierarchy
-
-```mermaid
-classDiagram
-    class Exception
-    class RepoArtefactsError
-    class GitRemoteError
-    class CollectionError
-    class StoreError
-
-    Exception <|-- RepoArtefactsError
-    RepoArtefactsError <|-- GitRemoteError
-    RepoArtefactsError <|-- CollectionError
-    RepoArtefactsError <|-- StoreError
-
-    note for RepoArtefactsError "Base exception — catch this to\nhandle any repo-artefacts error"
-    note for StoreError "Also inherits RepoArtefactsError\nvia the class definition"
-```
-
-```python
-# exceptions.py
-class RepoArtefactsError(Exception):
-    """Base exception for all repo-artefacts errors."""
-
-class GitRemoteError(RepoArtefactsError):
-    """Could not determine GitHub org/repo from git remote."""
-
-class CollectionError(RepoArtefactsError):
-    """Failed to collect repository content."""
-
-# store.py
-class StoreError(RepoArtefactsError):
-    """Error during artefact store operations."""
-```
-
-### Error Flow Through Layers
+### Generation Flow with Retries
 
 ```mermaid
-flowchart TD
-    A[Domain code raises\nCollectionError] --> B[CLI catches via\n_handle_errors decorator]
-    B --> C[Translates to\ntyper.Exit 1]
-    C --> D[User sees red\nerror message]
+sequenceDiagram
+    participant P as pipeline.py
+    participant G as generate_artefacts()
+    participant R as _with_reauth()
+    participant A as NotebookLM API
 
-    E[Domain code raises\nStoreError] --> B
+    P->>G: generate_artefacts(notebook_id, ["audio","video","slides","infographic"])
 
-    F[Pipeline catches\nException in execute] --> G[Records error in state\nbreaks pipeline]
-    G --> H[User sees red\nerror + resume hint]
+    G->>A: check completed artefacts (skip if already done)
+    A-->>G: already_completed = {}
 
-    I[NotebookLM API raises\nAuthError/RateLimitError] --> J[_with_reauth catches\nrefreshes + retries]
-    J --> K{Still failing?}
-    K -->|Yes| L[Raise RPCError]
-    K -->|No| M[Return success]
-    L --> G
+    note over G: Submit initial requests concurrently (CONCURRENCY_LIMIT=2)
+
+    G->>R: _request_artefact(audio)
+    G->>R: _request_artefact(video)
+    R->>A: generate_audio(notebook_id)
+    R->>A: generate_video(notebook_id)
+    A-->>R: task_id = "task-001"
+    A-->>R: task_id = "task-002"
+    R-->>G: pending = {audio: task-001, video: task-002}
+
+    G->>R: _request_artefact(slides)
+    G->>R: _request_artefact(infographic)
+    R->>A: generate_slide_deck(notebook_id)
+    A--xR: RateLimitError
+    R->>R: wait RATE_LIMIT_BACKOFF[0]=5s
+    R->>A: refresh_auth()
+    R->>A: generate_slide_deck(notebook_id) (retry)
+    A-->>R: task_id = "task-003"
+    A-->>R: immediate_failure (infographic quota)
+    note over R: quota confirmed on second attempt
+
+    R-->>G: pending = {audio:001, video:002, slides:003}, quota_exhausted={infographic}
+
+    loop Poll cycle (POLL_WINDOW=60s windows)
+        G->>A: get(task-001) audio
+        G->>A: get(task-002) video
+        G->>A: get(task-003) slides
+        A-->>G: audio: completed
+        A-->>G: video: still_in_progress
+        A-->>G: slides: failed
+
+        note over G: audio -> completed set\nslides -> needs_retry (retry 1/5)
+
+        G->>G: backoff 5s + refresh_auth
+        G->>A: delete failed slides artefact
+        G->>A: generate_slide_deck(notebook_id) (retry)
+        A-->>G: task_id = "task-004"
+    end
+
+    G->>A: get(task-002) video — completed
+    G->>A: get(task-004) slides — completed
+
+    G-->>P: GenerateResult(completed={audio,video,slides}, failed={}, quota_exhausted={infographic})
 ```
 
-### The Error Handler Decorator
+### Auth Retry Wrapper
+
+Every NotebookLM API call passes through `_with_reauth()`, which handles three error classes with different backoff strategies:
 
 ```python
-# cli.py — decorator pattern
-def _handle_errors(func):
-    """Decorator: catch domain exceptions and translate to typer.Exit."""
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except RepoArtefactsError as exc:
-            get_console().print(f"[red]Error:[/red] {exc}")
-            raise typer.Exit(code=1) from exc
-    return wrapper
-```
-
-**Teaching moment**: This is the **Decorator Pattern** — it wraps functions to add cross-cutting behaviour (error handling) without modifying the functions themselves. `@functools.wraps(func)` preserves the original function's name and docstring, which is important for Typer's help text. The `from exc` in `raise typer.Exit(code=1) from exc` preserves the exception chain so the original traceback is available for debugging.
-
-### NotebookLM Retry Strategy
-
-```python
-# notebooklm.py — handles three failure modes:
-#
-# 1. AuthError: stale CSRF/session → refresh_auth + quick retry
-# 2. RateLimitError: throttled → exponential backoff then refresh + retry
-# 3. Other RPCError: transient server issue → refresh + retry
-#
-# Backoff schedules:
-#   REAUTH_BACKOFF = [2, 10, 30]        # seconds between re-auth retries
-#   RATE_LIMIT_BACKOFF = [30, 60, 300]  # escalating backoff for rate limits
+REAUTH_BACKOFF = [2, 10, 30]          # seconds between retries for auth/RPC errors
+RATE_LIMIT_BACKOFF = [5, 15, 30, 60, 120]  # escalating backoff for rate limit errors
 
 async def _with_reauth(client, fn, label=""):
     last_exc = None
@@ -772,934 +552,554 @@ async def _with_reauth(client, fn, label=""):
         try:
             return await fn()
         except RateLimitError as e:
-            last_exc = e
             bk = RATE_LIMIT_BACKOFF[min(attempt - 1, len(RATE_LIMIT_BACKOFF) - 1)]
-            await asyncio.sleep(bk)
+            await asyncio.sleep(bk)           # longer wait for throttling
             await client.refresh_auth()
         except AuthError as e:
-            last_exc = e
-            await asyncio.sleep(wait)
+            await asyncio.sleep(wait)         # short wait, then refresh
             await client.refresh_auth()
         except RPCError as e:
-            last_exc = e
-            await asyncio.sleep(wait)
+            await asyncio.sleep(wait)         # medium wait, then refresh
             await client.refresh_auth()
-
-    # Final attempt after all backoffs exhausted
-    return await fn()  # May raise — caller handles it
+    # Final attempt — lets exception propagate to caller
+    return await fn()
 ```
 
-**Teaching moment**: This is the **Retry Pattern** with **exponential backoff**. The key insight is that different error types need different strategies:
-- **AuthError**: The session token expired — refresh and retry immediately (short backoff)
-- **RateLimitError**: The server is throttling — wait longer before retrying (longer backoff)
-- **RPCError**: Could be transient — refresh auth and retry (medium backoff)
+| Error type | Cause | Strategy |
+|------------|-------|----------|
+| `AuthError` | Stale CSRF or session token | Short wait (2-30s), refresh auth |
+| `RateLimitError` | API throttling | Longer wait (5-120s), refresh auth |
+| `RPCError` | Transient server error | Medium wait (2-30s), refresh auth |
 
-The `enumerate(REAUTH_BACKOFF, 1)` gives us `(1, 2), (2, 10), (3, 30)` — attempt number and wait time. After all retries are exhausted, there's one final attempt that lets the exception propagate to the caller.
+### Concurrent Generation with Semaphore
+
+Generation requests are submitted concurrently using `asyncio.Semaphore(CONCURRENCY_LIMIT=2)`. This prevents overloading the API while still running two requests in parallel:
+
+```python
+sem = asyncio.Semaphore(CONCURRENCY_LIMIT)  # max 2 concurrent requests
+
+async def _submit_one(artefact: str) -> None:
+    async with sem:
+        await _delete_existing_by_type(client, notebook_id, artefact, failed_only=not force_regen)
+        status = await _request_artefact(client, notebook_id, artefact)
+        ...
+
+await asyncio.gather(*[_submit_one(a) for a in to_generate])
+```
+
+After initial submission, polling uses `POLL_WINDOW=60`-second windows. All pending artefacts are polled concurrently in each window. Failures are queued in `needs_retry` and retried as a batch with a shared backoff after each poll cycle.
+
+### Quota Detection
+
+Infographics and slide decks have stricter daily generation caps than audio/video. Quota errors are detected by inspecting both the error message text and the `error_code` field:
+
+```python
+QUOTA_ERROR_PATTERNS = ["rate limit", "quota exceeded", "quota"]
+
+def _is_quota_error(error_msg: str | None, error_code: str | None = None) -> bool:
+    if error_code and error_code.upper() == "USER_DISPLAYABLE_ERROR":
+        return True
+    if error_msg:
+        lower = error_msg.lower()
+        return any(p in lower for p in QUOTA_ERROR_PATTERNS)
+    return False
+```
+
+When quota is suspected, the code refreshes auth and retries once to confirm it is not a transient error before marking the artefact as `quota_exhausted`. Quota-exhausted artefacts do not consume retries and are reported to the user with a 24-hour reset note.
+
+### Download via Data-Driven Specs
+
+Download logic avoids per-type conditionals by using a data-driven list of (label, list_method, download_method, filename) tuples:
+
+```python
+_DOWNLOAD_SPECS = [
+    ("audio",       "list_audio",        "download_audio",        "audio_overview.mp3"),
+    ("video",       "list_video",        "download_video",        "video_overview.mp4"),
+    ("slides",      "list_slide_decks",  "download_slide_deck",   "slides.pdf"),
+    ("infographic", "list_infographics", "download_infographic",  "infographic.png"),
+]
+```
+
+For each entry, only artefacts where `is_completed` is True are downloaded. If a type has more than one completed artefact (e.g., after partial retries), each is saved with a numeric suffix (`slides_01.pdf`, `slides_02.pdf`).
+
+### Source Deduplication
+
+Before generating, `_deduplicate_sources()` checks for multiple sources with the same title and removes all but the most recently added. This prevents confused generation when a notebook accumulates duplicate uploads from interrupted runs.
 
 ---
 
-## 8. Testing Strategy
+## 6. Deep Dive: Content Collection
 
-### Test Pyramid
+### Priority-Based Rule System
 
-```mermaid
-graph BT
-    subgraph "Top — Few, Slow, Comprehensive"
-        E2E[End-to-End Tests<br/>test_integration.py<br/>90 lines]
-    end
-
-    subgraph "Middle — Moderate Count"
-        UNIT_PIPELINE[Pipeline Tests<br/>test_pipeline.py<br/>642 lines]
-        UNIT_NOTEBOOKLM[NotebookLM Tests<br/>test_notebooklm.py<br/>158 lines]
-        UNIT_PAGES[Pages Tests<br/>test_pages.py<br/>166 lines]
-        UNIT_PUBLISH[Publish Tests<br/>test_publish.py<br/>119 lines]
-        UNIT_COLLECTOR[Collector Tests<br/>test_collector.py<br/>130 lines]
-        UNIT_CLI[CLI Tests<br/>test_cli.py<br/>142 lines]
-        UNIT_STORE[Store Tests<br/>test_store.py<br/>66 lines]
-    end
-
-    subgraph "Bottom — Many, Fast, Isolated"
-        FIXTURES[Shared Fixtures<br/>conftest.py<br/>47 lines]
-    end
-
-    E2E --> UNIT_PIPELINE
-    E2E --> UNIT_PAGES
-    E2E --> UNIT_COLLECTOR
-
-    UNIT_PIPELINE --> FIXTURES
-    UNIT_NOTEBOOKLM --> FIXTURES
-    UNIT_PAGES --> FIXTURES
-    UNIT_PUBLISH --> FIXTURES
-    UNIT_COLLECTOR --> FIXTURES
-    UNIT_CLI --> FIXTURES
-    UNIT_STORE --> FIXTURES
-```
-
-### Test Coverage by Module
-
-```mermaid
-pie title Test Coverage by Module (Lines of Test per Module)
-    "test_pipeline.py (642)" : 642
-    "test_pages.py (166)" : 166
-    "test_notebooklm.py (158)" : 158
-    "test_cli.py (142)" : 142
-    "test_collector.py (130)" : 130
-    "test_publish.py (119)" : 119
-    "test_integration.py (90)" : 90
-    "test_store.py (66)" : 66
-    "conftest.py (47)" : 47
-```
-
-### What Gets Tested vs What Doesn't
+The collector evaluates 6 `CollectionPattern` rules in priority order. Each file is collected by the first rule that matches it (first-match-wins deduplication):
 
 ```mermaid
 flowchart TD
-    subgraph "✅ Tested"
-        T1[Stage pre_check methods]
-        T2[Stage post_check methods]
-        T3[State save/load roundtrip]
-        T4[CLI command registration]
-        T5[CLI error handling]
-        T6[Artefact selection logic]
-        T7[Collector: file collection]
-        T8[Collector: size limits]
-        T9[Collector: skip dirs]
-        T10[Pages: README block]
-        T11[Pages: token resolution]
-        T12[Publish: check_artefacts]
-        T13[Publish: verify_pages]
-        T14[Publish: git commit/push]
-        T15[Store: slug validation]
-        T16[Store: safe rmtree]
-        T17[NotebookLM: config validation]
-        T18[NotebookLM: delete existing]
-        T19[NotebookLM: request artefact]
-        T20[NotebookLM: wait for artefact]
-        T21[Integration: pages setup]
-        T22[Integration: link checker]
-    end
+    A[("Repository Root")] --> R1
 
-    subgraph "❌ NOT Tested"
-        N1[run_pipeline runner loop]
-        N2[LocalPublishStage pre/post]
-        N3[LocalVerifyStage pre/post]
-        N4[ReadmeStage execute]
-        N5[VerifyStage execute]
-        N6[UploadStage execute mocked]
-        N7[DownloadStage post_check]
-        N8[config.py load/save]
-        N9[exceptions.py hierarchy]
-        N10[render_to_pdf]
-    end
+    R1["Rule 1 — README\npriority=1\nglobs: README.md, README.rst, README.txt"]
+    R2["Rule 2 — Agent instructions\npriority=2\nglobs: AGENTS.md, CLAUDE.md, GEMINI.md, CODING.md, DEVELOPMENT.md"]
+    R3["Rule 3 — Root docs\npriority=3\nglobs: *.md (excluding rule 1+2 names)"]
+    R4["Rule 4 — Documentation\npriority=4\nglobs: docs/**/*.md, doc/**/*.md\nexcludes: internal/, research/, brainstorming/"]
+    R5["Rule 5 — Configuration\npriority=5\nglobs: pyproject.toml, Cargo.toml, package.json, Makefile, ..."]
+    R6["Rule 6 — Source code\npriority=6\nglobs: packages/*/src/**/* and src/**/*\nincludes: .py .ts .js .rs .java .go ...\nexcludes: test_ /tests/ /migrations/"]
 
-    style T1 fill:#c8e6c9
-    style N1 fill:#ffcdd2
-    style N2 fill:#ffcdd2
-    style N3 fill:#ffcdd2
-    style N4 fill:#ffcdd2
-    style N5 fill:#ffcdd2
-    style N6 fill:#ffcdd2
-    style N7 fill:#ffcdd2
-    style N8 fill:#ffcdd2
-    style N9 fill:#ffcdd2
-    style N10 fill:#ffcdd2
+    R1 --> DEDUP["Deduplicate\n(first matching rule wins)"]
+    R2 --> DEDUP
+    R3 --> DEDUP
+    R4 --> DEDUP
+    R5 --> DEDUP
+    R6 --> DEDUP
+
+    DEDUP --> BUDGET["Size Budget Check\nMAX_TOTAL_BYTES = 700 KB\nfiles collected in priority order\nstop when budget exhausted"]
+
+    BUDGET --> RENDER["md files: include as raw markdown\nsource files: wrap in fenced code blocks\noutput: single combined markdown document"]
+
+    RENDER --> PDF["render_to_pdf()\nmd2pdf-mermaid + Chromium/Playwright\nA4 portrait with Mermaid diagram rendering"]
 ```
 
-### Testing Patterns Used
+### CollectionPattern Dataclass
 
 ```python
-# Pattern 1: Factory fixture (conftest.py)
-@pytest.fixture
-def make_repo(tmp_path: Path) -> Callable[[dict[str, str]], Path]:
-    def _make(files: dict[str, str]) -> Path:
-        repo = tmp_path / "repo"
-        repo.mkdir(exist_ok=True)
-        (repo / ".git").mkdir(exist_ok=True)
-        for name, content in files.items():
-            p = repo / name
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(content)
-        return repo
-    return _make
-
-# Usage:
-def test_collects_readme(make_repo):
-    repo = make_repo({"README.md": "# Hello\n\nWorld."})
-    out = repo / "out.md"
-    collect_repo_content(repo, out)
-    assert "# Hello" in out.read_text()
-
-
-# Pattern 2: Pre-built fixture (conftest.py)
-@pytest.fixture
-def artefacts_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    arts = repo / "docs" / "artefacts"
-    arts.mkdir(parents=True)
-    (arts / "audio_overview.mp3").write_bytes(b"fake-audio")
-    # ... more artefacts
-    return repo
-
-
-# Pattern 3: Helper function with sensible defaults (test_pipeline.py)
-def _make_ctx(tmp_path, *, repo_path=None, store_slug=None, ...):
-    rp = repo_path or tmp_path / "repo"
-    output_dir = rp / "docs" / "artefacts"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    state = PipelineState(repo_name="test-repo", ...)
-    return PipelineContext(repo_path=rp, state=state, ...)
-
-
-# Pattern 4: Mocking external services (test_publish.py)
-def test_verify_pages_success():
-    mock_resp = MagicMock()
-    mock_resp.status = 200
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        site_ok, _ = verify_pages("https://example.github.io/repo/artefacts/")
-        assert site_ok
-
-
-# Pattern 5: Parametrised tests (test_cli.py)
-@pytest.mark.parametrize(
-    "flags,expected_types",
-    [
-        ([], ["audio", "video", "slides", "infographic"]),
-        (["--audio", "--video"], ["audio", "video"]),
-        (["--exclude", "slides"], ["audio", "video", "infographic"]),
-    ],
-)
-def test_artefact_selection_flags(flags, expected_types):
-    # ... test logic
-```
-
-**Teaching moment**: These are five fundamental pytest patterns:
-1. **Factory fixture**: Returns a function that creates test data with varying inputs. More flexible than a single pre-built fixture.
-2. **Pre-built fixture**: Creates a complete test scenario. Faster when you always need the same setup.
-3. **Helper function with defaults**: Like a factory but not a pytest fixture — useful when you need to create multiple contexts in a single test.
-4. **Mocking**: Replace external dependencies (HTTP calls, subprocess) with controlled doubles. The `patch` context manager ensures cleanup.
-5. **Parametrised tests**: Run the same test logic with different inputs. Reduces duplication and makes edge cases explicit.
-
----
-
-## 9. Design Patterns Used
-
-### Pattern Inventory
-
-```mermaid
-mindmap
-  root((Design Patterns))
-    Structural
-      Decorator
-        _handle_errors in cli.py
-        @functools.wraps preserves metadata
-      Facade
-        pipeline.py hides complexity
-        Single run_pipeline entry point
-    Behavioral
-      Chain of Responsibility
-        Stage pre_check -> execute -> post_check
-        Each stage processes and passes/fails
-      Strategy
-        Publish vs LocalPublish stages
-        Verify vs LocalVerify stages
-        Selected by store_slug presence
-      State
-        PipelineState persisted to JSON
-        Resume from last successful stage
-      Observer
-        Rich console output at each stage
-        macOS notification on completion
-      Retry
-        _with_reauth in notebooklm.py
-        Exponential backoff for rate limits
-    Creational
-      Factory Method
-        make_repo fixture in conftest.py
-        _make_ctx helper in test_pipeline.py
-    Architectural
-      Layered Architecture
-        CLI -> Orchestration -> Domain -> Infrastructure
-      Gateway Pattern
-        Pre-check / Execute / Post-check gates
-      Fail-Fast
-        break on first stage failure
-        State persisted before breaking
-```
-
-### The Gateway Pattern in Detail
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Stage Execution                         │
-│                                                              │
-│   ┌──────────┐    ┌──────────┐    ┌──────────┐              │
-│   │ Pre-Check│───▶│ Execute  │───▶│Post-Check│              │
-│   │          │    │          │    │          │              │
-│   │ Validate │    │ Do the   │    │ Validate │              │
-│   │ inputs   │    │ work     │    │ outputs  │              │
-│   │ Skip if  │    │          │    │ Invariant│              │
-│   │ not needed│   │          │    │ checks   │              │
-│   └──────────┘    └──────────┘    └──────────┘              │
-│        │               │               │                    │
-│        ▼               ▼               ▼                    │
-│   PASS/FAIL/SKIP   PASS/FAIL      PASS/FAIL                │
-│                                                              │
-│   Any FAIL → pipeline breaks, state saved, user notified    │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Teaching moment**: The Gateway Pattern is named because each gate acts as a checkpoint that either allows passage to the next phase or blocks progress. It's similar to the **Circuit Breaker** pattern in distributed systems, but applied to sequential pipeline stages rather than network calls.
-
-### Why Not Use a Formal Abstract Base Class?
-
-```python
-# What we COULD do (but don't):
-from abc import ABC, abstractmethod
-
-class BaseStage(ABC):
-    name: str
-
-    @abstractmethod
-    def pre_check(self, ctx: PipelineContext) -> StageResult: ...
-
-    @abstractmethod
-    def execute(self, ctx: PipelineContext) -> StageResult: ...
-
-    @abstractmethod
-    def post_check(self, ctx: PipelineContext) -> StageResult: ...
-
-# What we DO instead:
-class CollectStage:
-    name = "collect"
-    def pre_check(self, ctx): ...
-    def execute(self, ctx): ...
-    def post_check(self, ctx): ...
-```
-
-**Teaching moment**: Python's **duck typing** means we don't need a formal base class. The runner iterates over `ALL_STAGES` and calls `.pre_check(ctx)`, `.execute(ctx)`, `.post_check(ctx)` on each. If a stage is missing a method, you get an `AttributeError` at runtime — which is caught by the runner's `except Exception` handler and reported as a stage error. An ABC would give you a clearer error at class definition time, but the current approach is simpler and works fine because the test `test_all_stages_have_required_methods` catches missing methods.
-
----
-
-## 10. Collector Architecture
-
-### Pattern-Based File Collection
-
-The collector uses a **priority-based pattern matching system** instead of hardcoded paths. Each rule defines globs, include/exclude regexes, and a priority level.
-
-```mermaid
-flowchart TD
-    A[Repo Root] --> B[Rule 1: README priority=1]
-    A --> C[Rule 2: Agent instructions priority=2]
-    A --> D[Rule 3: Root docs priority=3]
-    A --> E[Rule 4: docs/**/*.md priority=4]
-    A --> F[Rule 5: Config files priority=5]
-    A --> G[Rule 6: Source code priority=6]
-
-    B --> H[Deduplicate: first match wins]
-    C --> H
-    D --> H
-    E --> H
-    F --> H
-    G --> H
-
-    H --> I{Size budget check}
-    I -->|Under limit| J[Collect file]
-    I -->|Over limit| K[Stop, skip remaining]
-
-    J --> L[Wrap source in code blocks]
-    J --> M[Docs as raw markdown]
-    L --> N[Combined markdown document]
-    M --> N
-```
-
-### Collection Rules
-
-```python
-# collector.py — pattern-based collection rules
 @dataclass
 class CollectionPattern:
     name: str
-    globs: list[str]              # Glob patterns relative to repo root
-    include_regex: list[str]      # Must match (after glob)
-    exclude_regex: list[str]      # Exclude even if glob matches
-    max_lines: int | None = None  # Per-file line limit
-    priority: int = 10            # Lower = collected first
-
-COLLECTION_RULES: list[CollectionPattern] = [
-    CollectionPattern(
-        name="README",
-        globs=["README.md", "README.rst", "README.txt", "README"],
-        priority=1,
-    ),
-    CollectionPattern(
-        name="Agent instructions",
-        globs=["AGENTS.md", "CLAUDE.md", "GEMINI.md", "CODING.md"],
-        priority=2,
-    ),
-    CollectionPattern(
-        name="Documentation",
-        globs=["docs/**/*.md"],
-        exclude_regex=[
-            r"^docs/internal/",   # Brainstorming noise
-            r"^docs/research/",   # Research notes
-            r"^docs/brainstorming/",
-        ],
-        priority=4,
-    ),
-    CollectionPattern(
-        name="Source code",
-        globs=["packages/*/src/**/*", "src/**/*"],  # Monorepo support
-        include_regex=[r"\.(py|ts|js|rs|java|go|rb)$"],
-        exclude_regex=[
-            r"test_", r"/tests/",   # Skip test files
-            r"/migrations/",        # Skip generated files
-        ],
-        max_lines=500,
-        priority=6,
-    ),
-]
+    globs: list[str]              # glob patterns relative to repo root
+    include_regex: list[str] = field(default_factory=list)   # must match
+    exclude_regex: list[str] = field(default_factory=list)   # must not match
+    max_lines: int | None = None  # per-file line limit (None = no limit)
+    priority: int = 10            # lower = collected first
 ```
 
-**Teaching moment**: This is the **Specification Pattern** — each `CollectionPattern` is a reusable specification that combines multiple matching criteria (globs + regexes + priority). The collector evaluates all rules in priority order, deduplicating so each file is only collected once. This is far more flexible than the old approach of hardcoding `src/` and `docs/` paths.
+### Size and Safety Guards
+
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `MAX_TOTAL_BYTES` | 700 KB | Total combined content budget |
+| `MAX_SOURCE_LINES` | 500 | Per-file line cap for source files |
+| `MAX_FILE_BYTES` | 512 KB | Per-file size guard before reading |
+| `MAX_LINE_LENGTH` | 10,000 | Rejects minified or generated files |
+
+The `_read_safe()` function checks all of these before returning file content. If any guard triggers, the file is silently skipped.
+
+### Skip Directories
+
+The following directories are excluded during the tree walk regardless of glob patterns:
+
+```
+.git  .claude  .github  node_modules  __pycache__  .venv  venv
+dist  build  .tox  .eggs  target  .next  .nuxt  vendor
+.mypy_cache  .pytest_cache  htmlcov  site-packages
+```
 
 ### Monorepo Support
 
-```python
-# Old approach: only found src/ at repo root
-src_dir = repo_path / "src"
-search_dirs = [src_dir] if src_dir.is_dir() else [repo_path]
-
-# New approach: also finds packages/*/src/
-for pkg in sorted(packages_dir.iterdir()):
-    pkg_src = pkg / "src"
-    if pkg_src.is_dir():
-        search_dirs.append(pkg_src)
-```
-
-### Size Budget Management
-
-```python
-# Files collected in priority order until budget exhausted
-total_bytes = 0
-for rule_name, file_path, max_lines in matched_files:
-    content = _read_safe(file_path, max_lines=max_lines)
-    content_bytes = len(content.encode("utf-8"))
-    if total_bytes + content_bytes > MAX_TOTAL_BYTES:
-        get_console().print("  [yellow]⚠[/yellow] Size limit reached")
-        break
-    # ... collect file
-    total_bytes += content_bytes
-```
-
-**Real-world result for socratic-study-mentor** (monorepo, 130 files, 699.6 KB):
-- ✅ README, GEMINI.md, CONTRIBUTING.md (root docs)
-- ✅ 15 docs/ files (excluding 14 internal/ brainstorming files)
-- ✅ 4 config files (pyproject.toml, mkdocs.yml, cliff.toml, .pre-commit-config.yaml)
-- ✅ 40 agent-session-tools source files
-- ✅ 69 studyctl source files (CLI, content, doctor, history, web, etc.)
-- ❌ 2 files cut off (tui/sidebar.py, web/static/sw.js — non-critical)
+The source code rule includes `packages/*/src/**/*` alongside `src/**/*`, enabling collection from monorepos with multiple packages under a `packages/` directory.
 
 ---
 
-## 11. Notebook Lifecycle Management
+## 7. Deep Dive: Publishing
 
-### The Duplicate Artefact Problem
+### Two Modes Compared
 
-When a pipeline runs against a repo that already has a NotebookLM notebook:
+```mermaid
+flowchart LR
+    subgraph LocalMode["Local Mode (no --store)"]
+        direction TB
+        L1["Artefacts in\ndocs/artefacts/"] --> L2["Write\nindex.html player"]
+        L2 --> L3["Inject links into\nsource README.md"]
+        L3 --> L4["git commit + push\nsource repo"]
+        L4 --> L5["Enable GitHub Pages\n(source repo API)"]
+        L5 --> L6["Verify URLs live"]
+    end
+
+    subgraph StoreMode["Store Mode (--store Org/repo)"]
+        direction TB
+        S1["Artefacts in\ndocs/artefacts/"] --> S2["Clone/pull\nstore repo (shallow)"]
+        S2 --> S3["Copy artefacts to\nstore/repo-name/artefacts/"]
+        S3 --> S4["Write index.html player\nin store"]
+        S4 --> S5["Update manifest.json\nin store"]
+        S5 --> S6["git commit + push\nstore repo (with conflict retry)"]
+        S6 --> S7["Inject store URLs into\nsource README.md"]
+        S7 --> S8["git commit + push\nsource repo (README only)"]
+        S8 --> S9["Verify URLs live\n(store GitHub Pages)"]
+    end
+```
+
+**When to use each mode:**
+
+- **Local mode** is simpler. Artefact binary files are committed to the source repository and served by its GitHub Pages. Suitable for single repos where binary file history is acceptable.
+- **Store mode** keeps binary files out of source repository history. All artefacts live in one centralised store repository. The source repository only gains README links. Suitable for teams with multiple repositories or repositories where keeping git history clean matters.
+
+### Store Operations Detail
+
+The store maintains this structure on disk:
 
 ```
-Old behaviour (bug):
-  1. Find existing notebook by title → reuse it
-  2. Upload new source (replaces old source)
-  3. Generate artefacts with force_regen=False
-  4. _delete_existing_by_type(failed_only=True)
-  5. Result: old completed artefacts remain → DUPLICATES
-
-New behaviour (fixed):
-  1. Fresh run: delete existing notebook → create new one
-  2. Upload source to clean notebook
-  3. Generate artefacts with force_regen=True (source_replaced)
-  4. Result: no duplicates, clean slate
+artefact-store/
+├── manifest.json            # index of all repos and their artefacts
+├── CNAME                    # optional custom domain
+├── my-project/
+│   └── artefacts/
+│       ├── index.html       # player page (from template.html)
+│       ├── audio_overview.mp3
+│       ├── video_overview.mp4
+│       ├── slides.pdf
+│       └── infographic.png
+└── other-project/
+    └── artefacts/
+        └── ...
 ```
 
-### Notebook Decision Flow
+`manifest.json` structure:
+
+```json
+{
+  "repos": [
+    {
+      "name": "my-project",
+      "title": "My Project",
+      "description": "Short description",
+      "artefacts": ["audio", "video", "slides", "infographic"],
+      "updated": "2026-04-07"
+    }
+  ]
+}
+```
+
+Push conflicts are handled with a single retry: `git push` fails → `git pull --rebase` → `git push` again. If the second push also fails, the operation returns `False` and the pipeline records the stage as failed.
+
+### Token Resolution Chain
+
+`get_github_token()` in `pages.py` resolves a GitHub token through four sources in priority order:
 
 ```mermaid
 flowchart TD
-    A[upload_repo called] --> B{notebook_id provided?}
-    B -->|Yes: resume/override| C[Use existing notebook]
-    B -->|No: fresh run| D[List notebooks by title]
-    D --> E{Matching notebook exists?}
-    E -->|Yes| F[Delete old notebook]
-    F --> G[Wait 2s for API propagation]
-    G --> H[Verify deletion succeeded]
-    H --> I{Still exists?}
-    I -->|Yes| J[Retry delete + wait 3s]
-    I -->|No| K[Create new notebook]
-    J --> K
-    E -->|No| K
-    C --> L[Upload source]
-    K --> L
-    L --> M[Return: id, title, source_replaced]
-
-    style F fill:#ffcdd2
-    style K fill:#c8e6c9
-    style C fill:#fff3e0
-```
-
-### Source Replacement Tracking
-
-```python
-# notebooklm.py — upload_repo returns source_replaced flag
-async def upload_repo(...) -> dict[str, str | bool]:
-    source_replaced = False
-    # ... delete existing sources with same name ...
-    for src in sources:
-        if src.title == filename:
-            await client.sources.delete(nb_id, src.id)
-            source_replaced = True  # ← Track that we replaced a source
-    return {"id": nb_id, "title": nb_title, "source_replaced": source_replaced}
-
-# pipeline.py — GenerateStage uses source_replaced to decide force_regen
-force = ctx.force_regen or ctx.state.source_replaced
-result = await generate_artefacts(nb_id, target, force_regen=force)
-```
-
-**Teaching moment**: This is **context propagation** — information flows from the upload stage through the pipeline state to the generate stage. Each stage enriches the shared state, and downstream stages use that enriched state to make decisions. The alternative would be passing parameters between stages directly, which creates tight coupling.
-
----
-
-## 12. Retry and Timeout Strategy
-
-### The Timeout Starvation Bug
-
-The original bug: a single long-running `wait_for_artefact` could consume the entire timeout, starving retries of failed items.
-
-```
-Timeline (900s timeout):
-  0s    ┃ Request all 4 artefacts
-  5s    ┃ audio fails → queued for retry
-  5s    ┃ video, slides, infographic → pending
-  5s    ┃ Retry audio (backoff 30s)
-  35s   ┃ audio succeeds ✅
-  35s   ┃ Wait for video, slides, infographic
-  ...   ┃ infographic still in_progress
-  870s  ┃ infographic wait timeout (consumed 835s!)
-  870s  ┃ Only 30s remaining — not enough for video/slides retry (30s backoff each)
-  870s  ┃ video, slides marked "timed out" ❌
-  900s  ┃ Pipeline ends: 1 completed, 3 failed
-```
-
-### The Fix: Fair Timeout Allocation
-
-```python
-# notebooklm.py — cap wait time per artefact
-for label in list(pending):
-    remaining = deadline - time.monotonic()
-
-    # Reserve time for retries of other pending items
-    other_pending = len(pending) - 1 + len(needs_retry)
-    reserved = other_pending * 35  # 30s backoff + 5s buffer each
-    max_wait = max(remaining - reserved, 30)  # At least 30s per check
-
-    final_status = await _wait_for_artefact(
-        client, notebook_id, task_id, max_wait, label
-    )
-```
-
-With the fix, the same timeline becomes:
-
-```
-Timeline (900s timeout, fair allocation):
-  0s    ┃ Request all 4 artefacts
-  5s    ┃ audio fails → queued for retry
-  5s    ┃ video, slides, infographic → pending
-  5s    ┃ Retry audio (backoff 30s)
-  35s   ┃ audio succeeds ✅
-  35s   ┃ infographic wait capped to: 900 - (2 * 35) = 830s
-  ...   ┃ infographic still in_progress after 830s wait
-  865s  ┃ infographic returns "still in progress" → stays pending
-  865s  ┃ video wait capped to: 35s (35 remaining - 35 reserved)
-  900s  ┃ video timeout → queued for retry
-  900s  ┃ Pipeline continues, next iteration retries video
-```
-
-**Teaching moment**: This is the **Fair Scheduling** pattern — when multiple items share a limited resource (time), each item gets a capped allocation so no single item can starve the others. It's the same principle used in OS process schedulers and network bandwidth allocation.
-
-### Retry Strategy Overview
-
-```mermaid
-stateDiagram-v2
-    [*] --> Requested
-    Requested --> Pending: task_id returned
-    Requested --> Failed: immediate failure
-    Requested --> QuotaExhausted: quota error
-
-    Pending --> Completed: wait_for_artefact succeeds
-    Pending --> Failed: wait_for_artefact fails
-    Pending --> StillInProgress: timeout reached
-
-    Failed --> Retrying: retries < MAX_RETRIES
-    Failed --> PermanentlyFailed: retries >= MAX_RETRIES
-
-    Retrying --> Pending: re-request succeeded
-    Retrying --> PermanentlyFailed: retry failed
-
-    StillInProgress --> Completed: next poll succeeds
-    StillInProgress --> Failed: next poll fails
-
-    QuotaExhausted --> [*]: no retry possible
-    Completed --> [*]
-    PermanentlyFailed --> [*]
-
-    style Completed fill:#c8e6c9
-    style Failed fill:#ffcdd2
-    style PermanentlyFailed fill:#ffcdd2
-    style QuotaExhausted fill:#ffcdd2
-    style Retrying fill:#fff3e0
+    E["GITHUB_TOKEN env var"] -->|found| T["Return token"]
+    E -->|not found| A["age-encrypted file\n~/.config/secrets/tokens.age"]
+    A -->|found + decrypted| T
+    A -->|not found| K["macOS Keychain\nsecurity find-generic-password -s api-keys -a GITHUB_TOKEN"]
+    K -->|found| T
+    K -->|not found| OP["1Password CLI\nop item list --vault API_KEYS"]
+    OP -->|found| T
+    OP -->|not found| N["Return None\n(Pages enabling will be skipped)"]
 ```
 
 ---
 
-## 13. Target Architecture Improvements
+## 8. Deep Dive: Error Handling
 
-### Current vs Target State
+### Exception Hierarchy
 
 ```mermaid
-graph LR
-    subgraph "Current State"
-        C1[131 tests passing]
-        C2[Basic CI on push/PR]
-        C3[No coverage enforcement]
-        C4[run_pipeline untested]
-        C5[Dead CLI parameter]
-        C6[Implicit stage coupling]
-    end
+classDiagram
+    class Exception
+    class RepoArtefactsError {
+        Base for all domain errors.
+        Catch this to handle any
+        repo-artefacts error.
+    }
+    class GitRemoteError {
+        Could not determine GitHub
+        org/repo from git remote.
+    }
+    class CollectionError {
+        Failed to collect
+        repository content.
+    }
+    class StoreError {
+        Error during artefact
+        store operations.
+        Defined in store.py.
+    }
 
-    subgraph "Target State"
-        T1[90%+ coverage enforced]
-        T2[Nightly upstream test]
-        T3[Auto-version bump PR]
-        T4[Email alert on failure]
-        T5[Full runner test suite]
-        T6[Dynamic stage list]
-        T7[Doctor command]
-        T8[JSON output mode]
-        T9[All subprocess timeouts]
-    end
-
-    C1 --> T1
-    C2 --> T2
-    C2 --> T3
-    C2 --> T4
-    C4 --> T5
-    C5 --> T9
-    C6 --> T6
-    T1 --> T7
-    T1 --> T8
+    Exception <|-- RepoArtefactsError
+    RepoArtefactsError <|-- GitRemoteError
+    RepoArtefactsError <|-- CollectionError
+    RepoArtefactsError <|-- StoreError
 ```
 
-### Target CI/CD Pipeline
+`StoreError` is defined in `store.py` rather than `exceptions.py`. It still inherits from `RepoArtefactsError`, so the CLI's `_handle_errors` decorator catches it alongside the other domain exceptions.
+
+### Error Flow Through Layers
 
 ```mermaid
 flowchart TD
-    subgraph "PR CI (Current + Enhanced)"
-        PR[Pull Request] --> LINT[Lint: ruff + pyright]
-        LINT --> TEST[Test: pytest --cov --cov-fail-under=80]
-        TEST --> BUILD[Build: uv build]
-        BUILD --> MERGE[✅ Merge allowed]
-    end
+    D1["collector.py raises\nCollectionError"] --> C1
+    D2["pages.py raises\nGitRemoteError"] --> C1
+    D3["store.py raises\nStoreError"] --> C1
 
-    subgraph "Nightly CI (New)"
-        SCHEDULE[Nightly 2am UTC] --> CHECK[Check latest notebooklm-py]
-        CHECK --> INSTALL[Install without version cap]
-        INSTALL --> NIGHTLY_TEST[Test: full suite]
-        NIGHTLY_TEST --> NIGHTLY_LINT[Lint: ruff + pyright]
+    C1["CLI _handle_errors decorator\ncatches RepoArtefactsError"] --> U1["Print red error message\nraise typer.Exit(1)"]
 
-        NIGHTLY_TEST --> RESULT{All pass?}
-        RESULT -->|Yes| BUMP[Open PR: bump notebooklm-py version]
-        RESULT -->|No| EMAIL[Send email to andy@andytaylor.dev]
+    P1["Pipeline stage execute()\nraises any Exception"] --> P2["Runner catches exception\nrecords stage as 'error'\nsaves state\nbreaks pipeline loop"]
+    P2 --> P3["Print failure message\n+ resume hint\n+ state file path"]
 
-        EMAIL --> DETAILS[Include: failing tests,<br/>diff, notebooklm-py version]
-        BUMP --> DETAILS
-    end
+    N1["notebooklm-py raises\nAuthError"] --> W1
+    N2["notebooklm-py raises\nRateLimitError"] --> W1
+    N3["notebooklm-py raises\nRPCError"] --> W1
 
-    subgraph "Release CI (Future)"
-        TAG[Git tag] --> RELEASE_TEST[Full regression suite]
-        RELEASE_TEST --> PUBLISH[uv publish to PyPI]
-        PUBLISH --> ANNOUNCE[Release notes + changelog]
-    end
-
-    style PR fill:#e1f5fe
-    style SCHEDULE fill:#fff3e0
-    style TAG fill:#e8f5e9
-    style EMAIL fill:#ffcdd2
-    style BUMP fill:#c8e6c9
+    W1["_with_reauth() catches\nRefreshes auth\nRetries with backoff"] --> W2{"Retries\nexhausted?"}
+    W2 -->|Yes| W3["Re-raises RPCError\nto caller (stage runner)"]
+    W2 -->|No| W4["Return success result"]
 ```
 
-### Nightly Workflow Implementation
+### Retry Backoff Strategies
 
-```yaml
-# .github/workflows/nightly-deps.yml
-name: Nightly Dependency Test
-
-on:
-  schedule:
-    - cron: '0 2 * * *'  # 2am UTC daily
-  workflow_dispatch:     # Manual trigger
-
-permissions:
-  contents: write
-  pull-requests: write
-
-jobs:
-  test-latest-upstream:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ['3.11', '3.12', '3.13']
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v4
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install with latest notebooklm-py
-        run: |
-          # Temporarily remove the upper bound to test latest
-          uv sync --frozen --all-extras --dev
-          uv pip install --upgrade "notebooklm-py[browser]>=0.3.4"
-
-      - name: Run tests with coverage
-        run: uv run pytest -v --cov=repo_artefacts --cov-report=term-missing
-
-      - name: Run lint
-        run: |
-          uv run ruff check src/ tests/
-          uv run pyright
-
-      - name: Check for version bump
-        if: success()
-        id: version-check
-        run: |
-          CURRENT=$(uv pip show notebooklm-py | grep Version | awk '{print $2}')
-          PINNED=$(grep 'notebooklm-py' pyproject.toml | grep -oP '>=\K[0-9.]+')
-          if [ "$CURRENT" != "$PINNED" ]; then
-            echo "bump_needed=true" >> $GITHUB_OUTPUT
-            echo "new_version=$CURRENT" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Open version bump PR
-        if: steps.version-check.outputs.bump_needed == 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          title: "chore: bump notebooklm-py to ${{ steps.version-check.outputs.new_version }}"
-          body: |
-            Nightly test passed with notebooklm-py ${{ steps.version-check.outputs.new_version }}.
-            All tests and lint checks passed across Python 3.11-3.13.
-          branch: auto-bump-notebooklm-py
-          commit-message: "chore: bump notebooklm-py to ${{ steps.version-check.outputs.new_version }}"
-
-      - name: Send failure email
-        if: failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ Nightly dependency test failed — notebooklm-repo-artefacts"
-          body: |
-            Nightly dependency test failed for notebooklm-repo-artefacts.
-
-            Python version: ${{ matrix.python-version }}
-            notebooklm-py version: (latest)
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            Check the workflow run for detailed failure output.
-          to: andy@andytaylor.dev
-          from: GitHub Actions <ci@notebooklm-repo-artefacts>
-```
-
-### Target Test Architecture
-
-```mermaid
-flowchart TD
-    subgraph "Unit Tests (Fast, Isolated)"
-        U1[Stage pre_check tests — all 9 stages]
-        U2[Stage post_check tests — all 9 stages]
-        U3[State save/load — edge cases]
-        U4[CLI commands — all 11 commands]
-        U5[Collector — file types, limits, edge cases]
-        U6[NotebookLM — config, retry, quota detection]
-        U7[Pages — token resolution, README blocks]
-        U8[Publish — artefact check, verify, git ops]
-        U9[Store — slug validation, manifest, cache]
-        U10[Config — load, save, missing file, invalid]
-        U11[Exceptions — hierarchy, string repr]
-    end
-
-    subgraph "Integration Tests (Moderate)"
-        I1[run_pipeline runner — mock all stages]
-        I2[Collect -> Pages -> Link validation]
-        I3[Full pipeline mock — all stages]
-        I4[Resume logic — state persistence]
-        I5[Dry-run mode — no side effects]
-    end
-
-    subgraph "Contract Tests (External API)"
-        C1[notebooklm-py API surface unchanged]
-        C2[Expected classes exist]
-        C3[Expected methods exist]
-        C4[Method signatures compatible]
-    end
-
-    subgraph "CI Enforcement"
-        CI1[Coverage >= 80%]
-        CI2[All tests pass Python 3.11-3.13]
-        CI3[Lint: ruff + pyright clean]
-        CI4[Nightly upstream test]
-        CI5[Auto PR on version bump]
-    end
-
-    U1 --> I1
-    U2 --> I1
-    U3 --> I1
-    U4 --> I1
-    I1 --> CI1
-    I2 --> CI1
-    I3 --> CI1
-    I4 --> CI1
-    I5 --> CI1
-    C1 --> CI4
-    C2 --> CI4
-    C3 --> CI4
-    C4 --> CI4
-```
-
-### Dynamic Stage List (Proposed Fix)
-
-```python
-# Current (implicit coupling via SKIP gates):
-ALL_STAGES = [
-    CollectStage(),
-    UploadStage(),
-    GenerateStage(),
-    DownloadStage(),
-    PublishStage(),        # ← Skips if no store_slug
-    LocalPublishStage(),   # ← Skips if store_slug set
-    VerifyStage(),         # ← Skips if no store_slug
-    LocalVerifyStage(),    # ← Skips if store_slug set
-    CleanupStage(),
-]
-
-# Proposed (explicit, explicit is better than implicit):
-def _build_stage_list(store_slug: str | None) -> list:
-    """Build the stage list based on configuration.
-
-    This makes the pipeline structure explicit and easier to reason about.
-    No stage needs to know about the existence of other stages.
-    """
-    stages = [
-        CollectStage(),
-        UploadStage(),
-        GenerateStage(),
-        DownloadStage(),
-    ]
-
-    if store_slug:
-        # Store mode: publish to external store, verify, update README
-        stages.extend([
-            PublishStage(),
-            VerifyStage(),
-            ReadmeStage(),
-        ])
-    else:
-        # Local mode: publish to source repo's GitHub Pages
-        stages.extend([
-            LocalPublishStage(),
-            LocalVerifyStage(),
-        ])
-
-    stages.append(CleanupStage())
-    return stages
-```
-
-**Teaching moment**: This follows the **Explicit is Better Than Implicit** principle from the Zen of Python. The current approach works but requires reading each stage's `pre_check` to understand which stages actually run. The proposed approach makes the pipeline structure visible at a glance. The tradeoff is that `_build_stage_list` now needs to know about all stage classes, creating a central point of change when new stages are added.
+| Scenario | Backoff sequence | Auth refresh? |
+|----------|-----------------|---------------|
+| `AuthError` | 2s, 10s, 30s (then final attempt) | Yes, after each wait |
+| `RateLimitError` | 5s, 15s, 30s, 60s, 120s (indexed by attempt) | Yes, after each wait |
+| `RPCError` | 2s, 10s, 30s (then final attempt) | Yes, after each wait |
+| Generation retry | `RATE_LIMIT_BACKOFF[retry_count]`, max 120s, shared across batch | Yes, before batch submit |
 
 ---
 
-## Appendix A: Key File Locations
+## 9. Module Interface Reference
+
+### Public Exports by Module
+
+| Module | Key public exports | Primary callers |
+|--------|-------------------|-----------------|
+| `cli.py` | `app` (Typer application) | `pyproject.toml` entry point |
+| `pipeline.py` | `run_pipeline()`, `PipelineContext`, `PipelineState`, `ALL_STAGES` | `cli.pipeline` command |
+| `collector.py` | `collect_repo_content()`, `render_to_pdf()` | `pipeline.CollectStage`, `cli.process` |
+| `notebooklm.py` | `upload_repo()`, `generate_artefacts()`, `download_artefacts()`, `delete_notebook()`, `list_notebooks()`, `list_sources()`, `ARTEFACT_CONFIG` | `pipeline.*Stage`, `cli.generate`, `cli.download`, `cli.list`, `cli.delete` |
+| `pages.py` | `setup_pages()`, `get_github_info()`, `get_github_token()`, `enable_github_pages()` | `pipeline.LocalPublishStage`, `pipeline.ReadmeStage`, `cli.pages`, `cli.publish`, `cli.migrate` |
+| `store.py` | `clone_or_pull_store()`, `publish_to_store()`, `commit_and_push_store()`, `list_store_repos()`, `remove_store_repo()`, `update_manifest()`, `StoreError` | `pipeline.PublishStage`, `cli.publish`, `cli.migrate`, `cli.clean`, `cli.validate` |
+| `publish.py` | `check_artefacts()`, `verify_pages()`, `git_commit_and_push()`, `STANDARD_FILES` | `pipeline.*Stage`, `store.py`, `cli.publish`, `cli.validate` |
+| `config.py` | `load_config()`, `save_config()`, `Config` | `cli.pipeline`, `cli.publish`, `store.py` |
+| `console.py` | `get_console()`, `configure_console()` | All modules |
+| `exceptions.py` | `RepoArtefactsError`, `GitRemoteError`, `CollectionError` | `cli.py`, `collector.py`, `pages.py` |
+
+### Key Function Signatures
+
+```python
+# pipeline.py
+def run_pipeline(
+    repo_path: Path,
+    *,
+    store_slug: str | None = None,
+    keep_notebook: bool = False,
+    force_regen: bool = False,
+    dry_run: bool = False,
+    resume: bool = False,
+    timeout: int = 900,
+    artefact_selection: list[str] | None = None,
+    notebook_id: str | None = None,
+) -> bool: ...
+
+# collector.py
+def collect_repo_content(repo_path: Path, output_path: Path) -> Path: ...
+def render_to_pdf(md_path: Path) -> Path: ...
+
+# notebooklm.py
+async def upload_repo(
+    content_path: Path,
+    repo_name: str,
+    notebook_id: str | None = None,
+) -> dict[str, str | bool]: ...   # keys: id, title, source_replaced
+
+async def generate_artefacts(
+    notebook_id: str,
+    artefacts: list[str],
+    timeout: int = 900,
+    *,
+    force_regen: bool = False,
+) -> GenerateResult: ...
+
+async def download_artefacts(notebook_id: str, output_dir: Path) -> None: ...
+
+# pages.py
+def setup_pages(
+    repo_root: Path,
+    org: str,
+    repo: str,
+    store_base_url: str | None = None,
+    available_artefacts: set[str] | None = None,
+) -> str: ...   # returns player URL
+
+# store.py
+def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path: ...
+def publish_to_store(
+    store_path: Path,
+    repo_name: str,
+    artefacts_dir: Path,
+    description: str = "",
+) -> str: ...   # returns base URL
+def commit_and_push_store(store_path: Path, repo_name: str) -> bool: ...
+
+# publish.py
+def check_artefacts(artefacts_dir: Path) -> dict[str, Path]: ...
+def verify_pages(
+    url: str,
+    max_wait: int = 120,
+    artefact_urls: dict[str, str] | None = None,
+) -> tuple[bool, set[str]]: ...
+def git_commit_and_push(
+    repo_root: Path,
+    message: str,
+    remote: str = "origin",
+    branch: str | None = None,
+    outputs: list[str] | None = None,
+) -> bool: ...
+```
+
+---
+
+## 10. External Dependencies
+
+| Package | Version constraint | Role |
+|---------|-------------------|------|
+| `notebooklm-py[browser]` | `>=0.3.4,<0.4` | Google NotebookLM API wrapper. The `[browser]` extra installs Playwright for the browser-based auth flow. Upper-bound pinned because the API surface changed between minor versions during active development. |
+| `md2pdf-mermaid` | `>=1.4` | Converts markdown to PDF using Playwright/Chromium. Renders Mermaid diagrams as images. Requires `playwright install chromium` on first use. |
+| `typer` | `>=0.12` | CLI framework. Provides command registration, argument parsing, help text generation, and `typer.Exit` for exit codes. |
+| `rich` | `>=13.0` | Terminal output formatting. Used for coloured status messages, tables, and rules. Shared through the `console.py` singleton. |
+
+### Runtime Tool Dependencies
+
+| Tool | Required for | Checked at |
+|------|-------------|------------|
+| `git` | All git operations (clone, push, remote detection) | Runtime (subprocess calls) |
+| `chromium` (via Playwright) | PDF rendering with Mermaid diagram support | `render_to_pdf()` call |
+| `age` | Decrypting token file (optional) | `get_github_token()` |
+| `security` | macOS Keychain token lookup (optional) | `get_github_token()` |
+| `op` | 1Password CLI token lookup (optional) | `get_github_token()` |
+
+---
+
+## 11. Design Decisions
+
+### ADR-1: Stage-Based Pipeline vs Simple Sequential Function Calls
+
+**Decision:** Implement a stage-based pipeline with state persistence rather than a single function that calls operations sequentially.
+
+**Context:** NotebookLM artefact generation takes 5-15 minutes and has a non-trivial failure rate due to API instability, rate limits, and daily quotas. A simple sequential function that fails halfway through leaves the user with no way to recover without re-running the entire expensive operation.
+
+**Consequences:** The stage-based design makes failure recovery first-class. State is persisted after every stage, so `--resume` can re-enter the pipeline at the exact point of failure. The tradeoff is additional complexity: `PipelineContext`, `PipelineState`, `StageResult`, and `Status` types that would be unnecessary in a simple sequential design.
+
+---
+
+### ADR-2: Duck Typing for Stages vs Abstract Base Class
+
+**Decision:** Stage classes implement the `pre_check / execute / post_check` interface through duck typing. There is no `BaseStage` ABC.
+
+**Context:** Python does not require formal interface declarations for runtime correctness. The runner calls `stage.pre_check(ctx)` and Python will raise `AttributeError` at runtime if a stage is missing the method.
+
+**Consequences:** The simplest approach that works. An ABC would give a clearer error at class definition time, but the test suite includes `test_all_stages_have_required_methods` which catches missing methods before they reach runtime. Adding a `typing.Protocol` for IDE support is a low-effort improvement if needed.
+
+---
+
+### ADR-3: Two Publish Modes
+
+**Decision:** Support both local mode (artefacts in source repo) and store mode (artefacts in a separate centralised repository), selected by the presence or absence of `--store`.
+
+**Context:** Committing binary artefact files (MP3, MP4, PDF, PNG) to a source repository bloats git history and can make clones slow. However, adding a separate store repository is extra operational overhead that not all users want.
+
+**Consequences:** Two separate code paths for publishing and verification (`PublishStage/VerifyStage/ReadmeStage` vs `LocalPublishStage/LocalVerifyStage`). Both paths converge at `CleanupStage`. The mutual exclusion is encoded in each stage's `pre_check` rather than in a conditional stage list, which keeps the runner loop simple.
+
+---
+
+### ADR-4: Content-Hash-Based Upload Skip
+
+**Decision:** `UploadStage.pre_check` computes and stores a SHA-256 hash of the collected PDF and returns `SKIP` on `--resume` if the hash is unchanged from the previous run.
+
+**Context:** If a pipeline fails at the generate stage, `--resume` should not re-upload the same content to create a new notebook. The content has not changed, the notebook already exists with the source processed, and re-uploading would reset source processing state.
+
+**Consequences:** The hash is stored in `stages.upload.content_hash` in the state file. On resume, `UploadStage.pre_check` reads this value and compares it to the current PDF hash stored in `ctx.state.content_hash` (set by `CollectStage`). This skip only activates when `--resume` is used and an `notebook_id` is present in state; a fresh run always uploads.
+
+---
+
+### ADR-5: Concurrent Generation with Semaphore
+
+**Decision:** Use `asyncio.Semaphore(CONCURRENCY_LIMIT=2)` to submit up to two generation requests simultaneously, then poll all pending artefacts concurrently in `POLL_WINDOW=60`-second windows.
+
+**Context:** NotebookLM generation is slow (5-15 min per artefact) and independent across artefact types. Sequential generation would take 4x longer for a full set. However, submitting all four simultaneously risks rate limiting.
+
+**Consequences:** The semaphore caps simultaneous submission at 2 while still running generation in parallel. Polling is fully concurrent because it is read-only. The poll window approach (rather than waiting for each artefact individually) ensures that a failed artefact is detected within 60 seconds rather than only after all others complete, which is important for prompt retry scheduling.
+
+---
+
+## Appendix: File Locations
 
 ```
 src/repo_artefacts/
-├── __init__.py          # Package docstring
+├── __init__.py          # package declaration
 ├── cli.py               # 11 Typer commands (entry point)
-├── pipeline.py          # Stage-based pipeline runner
-├── collector.py         # Repo content collection + PDF rendering
-├── notebooklm.py        # NotebookLM API integration
-├── publish.py           # Legacy orchestrator + git operations
-├── pages.py             # GitHub Pages setup + token resolution
-├── store.py             # Artefact store operations
-├── config.py            # User config load/save
-├── console.py           # Shared Rich console singleton
-├── exceptions.py        # Domain exception hierarchy
+├── pipeline.py          # 9-stage pipeline runner with state persistence
+├── collector.py         # priority-based file collection + PDF rendering
+├── notebooklm.py        # NotebookLM API: upload, generate, download, manage
+├── publish.py           # check_artefacts, verify_pages, git_commit_and_push
+├── pages.py             # GitHub Pages setup, README injection, token resolution
+├── store.py             # artefact store: clone, publish, manifest, push
+├── config.py            # TOML config at ~/.config/repo-artefacts/config.toml
+├── console.py           # shared Rich console singleton
+├── exceptions.py        # RepoArtefactsError, GitRemoteError, CollectionError
 └── template.html        # HTML player page template
 
 tests/
-├── conftest.py          # Shared fixtures
-├── test_cli.py          # CLI command tests
-├── test_collector.py    # Content collection tests
-├── test_integration.py  # End-to-end local flow tests
-├── test_notebooklm.py   # NotebookLM API tests (mocked)
-├── test_pages.py        # GitHub Pages tests
-├── test_pipeline.py     # Pipeline stage tests (largest file)
-├── test_publish.py      # Publish module tests
-└── test_store.py        # Store module tests
-
-.github/workflows/
-└── ci.yml               # PR CI: lint + test + build
+├── conftest.py          # make_repo factory fixture, artefacts_repo fixture
+├── test_cli.py          # CLI command registration and error handling
+├── test_collector.py    # file collection, size limits, skip dirs
+├── test_integration.py  # end-to-end local pages flow
+├── test_notebooklm.py   # upload, generate, retry (mocked)
+├── test_pages.py        # README injection, token resolution
+├── test_pipeline.py     # stage pre_check/post_check, state save/load
+├── test_publish.py      # check_artefacts, verify_pages, git operations
+└── test_store.py        # slug validation, safe_rmtree, manifest
 
 docs/
-├── TODO.md              # Remediation tasks from code review
-├── architecture.md      # This file
-├── codemap.md           # Architecture overview
-├── how-it-works.md      # End-to-end workflow
-├── pipeline.md          # Pipeline architecture
-└── ...                  # Other documentation
+├── architecture.md      # this document — high-level + deep dives
+├── c4-architecture.md   # C4 model (context, container, component, code)
+├── codemap.md           # module breakdown with interfaces and data flows
+├── use-cases.md         # 10 use cases with how-to guides and diagrams
+├── troubleshooting.md   # troubleshooting guide + operational runbook
+├── ci-and-testing.md    # CI pipeline and local testing
+└── TODO.md              # remediation tasks
 ```
 
-## Appendix B: Quick Reference Commands
+## Appendix: Quick Reference Commands
 
 ```bash
-# Run the pipeline
-repo-artefacts pipeline                          # Full pipeline, all artefacts
-repo-artefacts pipeline --audio --video          # Only audio + video
-repo-artefacts pipeline --exclude infographic    # All except infographic
-repo-artefacts pipeline --resume                 # Resume from last successful stage
-repo-artefacts pipeline --force-regen            # Delete all artefacts and regenerate
-repo-artefacts pipeline --clean                  # Delete artefacts dir before running
-repo-artefacts pipeline --store Org/repo         # Publish to artefact store
-repo-artefacts pipeline --keep-notebook          # Don't delete notebook after publish
+# Full pipeline (all artefacts, local mode)
+repo-artefacts pipeline
 
-# Run tests
-uv run pytest                                    # All tests
-uv run pytest tests/test_pipeline.py -v          # Pipeline tests only
-uv run pytest --cov=repo_artefacts               # With coverage
-uv run pytest --cov=repo_artefacts --cov-fail-under=80  # Enforce 80% coverage
+# Full pipeline (store mode)
+repo-artefacts pipeline --store Org/artefact-store
 
-# Run lint
-uv run ruff check src/ tests/                    # Lint
-uv run ruff format src/ tests/                   # Format
-uv run pyright                                   # Type check
+# Selective artefact generation
+repo-artefacts pipeline --audio --video
+repo-artefacts pipeline --exclude infographic
 
-# Pre-commit (runs all checks)
-pre-commit run --all-files
+# Resume a failed pipeline
+repo-artefacts pipeline --resume
 
-# Build package
-uv build
+# Force regenerate all artefacts
+repo-artefacts pipeline --force-regen
+
+# Delete artefacts dir and start clean
+repo-artefacts pipeline --clean
+
+# Keep the NotebookLM notebook after publishing
+repo-artefacts pipeline --keep-notebook
+
+# Individual steps
+repo-artefacts process                          # collect + upload only
+repo-artefacts generate -n $NOTEBOOK_ID        # generate all types
+repo-artefacts download -n $NOTEBOOK_ID        # download completed artefacts
+repo-artefacts pages                            # setup GitHub Pages for existing artefacts
+
+# Store management
+repo-artefacts migrate --store Org/repo        # move artefacts from source to store
+repo-artefacts validate                         # check artefact URLs in README
+repo-artefacts validate --all --store Org/repo # check all repos in store
+repo-artefacts clean --store Org/repo          # find orphaned store artefacts
+repo-artefacts clean --store Org/repo --delete # remove orphans and push
+
+# Development
+uv run pytest                                   # run all tests
+uv run pytest --cov=repo_artefacts              # with coverage
+uv run ruff check src/ tests/                   # lint
+uv run ruff format src/ tests/                  # format
+uv run pyright                                  # type check
 ```

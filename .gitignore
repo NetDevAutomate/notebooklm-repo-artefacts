@@ -68,8 +68,9 @@ CLAUDE.md
 .speckit/
 .openspec/
 
-# Plans (local only)
+# Plans and brainstorms (local only)
 docs/plans/
+docs/brainstorms/
 
 # Pipeline state (ephemeral, resumable)
 .pipeline-state.json

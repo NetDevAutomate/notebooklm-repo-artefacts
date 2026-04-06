@@ -76,7 +76,7 @@ repo-artefacts pipeline /path/to/repo -n NOTEBOOK_ID --resume
 repo-artefacts pipeline /path/to/repo --keep-notebook
 ```
 
-See [Pipeline Architecture](docs/pipeline.md) for the full flow diagram and comparison with `publish`.
+See [Architecture](docs/architecture.md) for the full system design, or [Code Map](docs/codemap.md) for module-level detail.
 
 ### `process` — Collect repo content and upload to NotebookLM
 
