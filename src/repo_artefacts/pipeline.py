@@ -674,6 +674,12 @@ def run_pipeline(
             ctx.state.set_stage(stage.name, "dry_run")
             continue
 
+        # Resume: skip stages that already passed in a previous run
+        if resume and ctx.state.stage_status(stage.name) == "pass":
+            logger.info("Stage %s: already passed — skipping (resume)", stage.name)
+            console.print("  [dim]Already passed — skipping (resume)[/dim]")
+            continue
+
         # Pre-check
         pre = stage.pre_check(ctx)
         if pre.status == Status.SKIP:
