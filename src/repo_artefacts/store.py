@@ -87,12 +87,12 @@ def clone_or_pull_store(store_slug: str, token: str | None = None) -> Path:
         else:
             return cache_dir
 
-    # Clone fresh (shallow)
+    # Clone fresh (shallow) — prefer SSH, fall back to HTTPS with token
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
     if token:
         clone_url = f"https://x-access-token:{token}@github.com/{store_slug}.git"
     else:
-        clone_url = f"https://github.com/{store_slug}.git"
+        clone_url = f"git@github.com:{store_slug}.git"
 
     get_console().print(f"  Cloning {store_slug} (shallow)...")
     result = subprocess.run(
