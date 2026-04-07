@@ -509,6 +509,8 @@ class TestPublishStage:
 
 
 class TestCleanupStage:
+    # --- pre_check: non-store mode (notebook cleanup only) ---
+
     def test_skip_with_keep_notebook(self, tmp_path: Path) -> None:
         ctx = _make_ctx(tmp_path, keep_notebook=True, notebook_id="nb-1")
         result = CleanupStage().pre_check(ctx)
@@ -557,7 +559,7 @@ class TestCleanupStage:
         result = CleanupStage().post_check(ctx)
         assert result.status == Status.PASS
 
-    # --- Artefact selection ---
+    # --- pre_check: artefact selection ---
 
     def test_pass_with_partial_selection_all_done(self, tmp_path: Path) -> None:
         """When only audio+video selected and both completed, cleanup should proceed."""
@@ -592,6 +594,96 @@ class TestCleanupStage:
         )
         result = CleanupStage().pre_check(ctx)
         assert result.status == Status.PASS
+
+    # --- pre_check: store mode (always runs for local file cleanup) ---
+
+    def test_pass_in_store_mode_even_without_notebook(self, tmp_path: Path) -> None:
+        """Store mode should always pass pre_check — local files need cleanup."""
+        ctx = _make_ctx(tmp_path, store_slug="Org/repo", notebook_id="")
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+    def test_pass_in_store_mode_with_keep_notebook(self, tmp_path: Path) -> None:
+        """Store mode runs even with keep_notebook — file cleanup is independent."""
+        all_completed = {name: "completed" for name in ARTEFACT_CONFIG}
+        ctx = _make_ctx(
+            tmp_path,
+            store_slug="Org/repo",
+            keep_notebook=True,
+            notebook_id="nb-1",
+            artefacts=all_completed,
+        )
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+    def test_pass_in_store_mode_with_incomplete_artefacts(self, tmp_path: Path) -> None:
+        """Store mode runs even with incomplete artefacts — files still need cleanup."""
+        ctx = _make_ctx(
+            tmp_path,
+            store_slug="Org/repo",
+            notebook_id="nb-1",
+            artefacts={"audio": "failed"},
+        )
+        result = CleanupStage().pre_check(ctx)
+        assert result.status == Status.PASS
+
+    # --- execute: store-mode local file cleanup ---
+
+    def test_execute_removes_artefact_files_in_store_mode(self, tmp_path: Path) -> None:
+        """Store-mode cleanup should delete local artefact binaries."""
+        ctx = _make_ctx(tmp_path, store_slug="Org/repo", notebook_id="")
+        # Create fake artefact files
+        (ctx.output_dir / "audio_overview.mp3").write_bytes(b"fake-audio")
+        (ctx.output_dir / "video_overview.mp4").write_bytes(b"fake-video")
+        (ctx.output_dir / "infographic.png").write_bytes(b"fake-image")
+        (ctx.output_dir / "slides.pdf").write_bytes(b"fake-pdf")
+        # Create pipeline state/log files
+        (ctx.output_dir / ".pipeline-state.json").write_text("{}")
+        (ctx.output_dir / ".pipeline.log").write_text("log")
+
+        result = CleanupStage().execute(ctx)
+
+        assert result.status == Status.PASS
+        assert "Removed 4 local artefact files" in result.message
+        # All artefact files gone
+        assert not (ctx.output_dir / "audio_overview.mp3").exists()
+        assert not (ctx.output_dir / "video_overview.mp4").exists()
+        assert not (ctx.output_dir / "infographic.png").exists()
+        assert not (ctx.output_dir / "slides.pdf").exists()
+        # Pipeline state/log files gone
+        assert not (ctx.output_dir / ".pipeline-state.json").exists()
+        assert not (ctx.output_dir / ".pipeline.log").exists()
+        # Directory removed (was empty)
+        assert not ctx.output_dir.exists()
+
+    def test_execute_removes_dir_only_if_empty(self, tmp_path: Path) -> None:
+        """If non-artefact files remain, the directory should be preserved."""
+        ctx = _make_ctx(tmp_path, store_slug="Org/repo", notebook_id="")
+        (ctx.output_dir / "audio_overview.mp3").write_bytes(b"fake-audio")
+        (ctx.output_dir / "custom-file.txt").write_text("keep me")
+
+        result = CleanupStage().execute(ctx)
+
+        assert result.status == Status.PASS
+        assert not (ctx.output_dir / "audio_overview.mp3").exists()
+        # Directory still exists because custom-file.txt remains
+        assert ctx.output_dir.exists()
+        assert (ctx.output_dir / "custom-file.txt").exists()
+
+    def test_execute_no_file_cleanup_without_store(self, tmp_path: Path) -> None:
+        """Non-store mode should not touch local artefact files."""
+        from unittest.mock import patch
+
+        all_completed = {name: "completed" for name in ARTEFACT_CONFIG}
+        ctx = _make_ctx(tmp_path, notebook_id="nb-1", artefacts=all_completed)
+        (ctx.output_dir / "audio_overview.mp3").write_bytes(b"fake-audio")
+
+        with patch("repo_artefacts.pipeline.asyncio.run"):
+            result = CleanupStage().execute(ctx)
+
+        assert result.status == Status.PASS
+        # File untouched — no store cleanup in non-store mode
+        assert (ctx.output_dir / "audio_overview.mp3").exists()
 
 
 # ===========================================================================
@@ -707,6 +799,7 @@ class TestAllStages:
             "local_publish",
             "verify",
             "local_verify",
+            "readme",
             "cleanup",
         ]
 

@@ -494,16 +494,27 @@ class ReadmeStage:
 
 
 class CleanupStage:
-    """Optionally delete the NotebookLM notebook."""
+    """Delete the NotebookLM notebook and remove local artefact files in store mode."""
 
     name = "cleanup"
 
+    def _notebook_cleanup_ok(self, ctx: PipelineContext) -> bool:
+        """Check whether notebook cleanup should proceed."""
+        if ctx.keep_notebook or not ctx.state.notebook_id:
+            return False
+        acceptable = {"completed", "quota_exhausted"}
+        target = ctx.artefact_selection or list(ARTEFACT_CONFIG)
+        return all(ctx.state.artefacts.get(name) in acceptable for name in target)
+
     def pre_check(self, ctx: PipelineContext) -> StageResult:
+        # Store mode always needs cleanup (remove local artefact files)
+        if ctx.store_slug:
+            return StageResult(Status.PASS)
+        # Non-store: only run for notebook cleanup
         if ctx.keep_notebook:
             return StageResult(Status.SKIP, "Keeping notebook")
         if not ctx.state.notebook_id:
             return StageResult(Status.SKIP, "No notebook to clean up")
-        # Only clean up if all targeted artefacts completed (quota_exhausted counts as done)
         acceptable = {"completed", "quota_exhausted"}
         target = ctx.artefact_selection or list(ARTEFACT_CONFIG)
         all_done = all(ctx.state.artefacts.get(name) in acceptable for name in target)
@@ -515,10 +526,31 @@ class CleanupStage:
         return StageResult(Status.PASS)
 
     def execute(self, ctx: PipelineContext) -> StageResult:
-        from repo_artefacts.notebooklm import delete_notebook
+        messages = []
 
-        asyncio.run(delete_notebook(ctx.state.notebook_id))
-        return StageResult(Status.PASS, f"Deleted notebook {ctx.state.notebook_id}")
+        # Store mode: remove local artefact binaries (already published to store)
+        if ctx.store_slug:
+            from repo_artefacts.publish import check_artefacts
+
+            found = check_artefacts(ctx.output_dir)
+            for path in found.values():
+                path.unlink(missing_ok=True)
+            # Clean up pipeline state and log files
+            for name in [STATE_FILENAME, ".pipeline.log"]:
+                (ctx.output_dir / name).unlink(missing_ok=True)
+            # Remove directory if empty
+            if ctx.output_dir.exists() and not any(ctx.output_dir.iterdir()):
+                ctx.output_dir.rmdir()
+            messages.append(f"Removed {len(found)} local artefact files")
+
+        # Notebook cleanup (respects keep_notebook and completion status)
+        if self._notebook_cleanup_ok(ctx):
+            from repo_artefacts.notebooklm import delete_notebook
+
+            asyncio.run(delete_notebook(ctx.state.notebook_id))
+            messages.append(f"Deleted notebook {ctx.state.notebook_id}")
+
+        return StageResult(Status.PASS, "; ".join(messages) if messages else "Nothing to clean up")
 
     def post_check(self, ctx: PipelineContext) -> StageResult:
         return StageResult(Status.PASS)
@@ -537,6 +569,7 @@ ALL_STAGES = [
     LocalPublishStage(),
     VerifyStage(),
     LocalVerifyStage(),
+    ReadmeStage(),
     CleanupStage(),
 ]
 
